@@ -21,6 +21,7 @@ class InsMusic(loader.Module):
         self.db = db
 
     async def search_in_bot(self, bot_username, query, message):
+        """Поиск музыки в конкретном боте."""
         try:
             music = await message.client.inline_query(bot_username, query)
             if music and len(music) > 0 and hasattr(music[0].result, 'document'):
@@ -30,15 +31,18 @@ class InsMusic(loader.Module):
         return None
 
     async def search_music_fast(self, query, message):
+        """Быстрый параллельный поиск музыки через всех ботов."""
         tasks = []
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
             tasks.append((bot_username, task))
-
+        
+        # Ждем первый успешный результат
         for bot_username, task in tasks:
             try:
                 result = await asyncio.wait_for(task, timeout=3.0)
                 if result:
+                    # Отменяем остальные задачи
                     for other_bot, other_task in tasks:
                         if other_bot != bot_username and not other_task.done():
                             other_task.cancel()
@@ -47,15 +51,17 @@ class InsMusic(loader.Module):
                 continue
             except Exception:
                 continue
-
+        
         return None
 
     async def search_music(self, query, message):
+        """Основная функция поиска музыки."""
         async with self._search_lock:
             return await self.search_music_fast(query, message)
 
     @loader.command()
     async def мcmd(self, message):
+        """Ищет песни по названию."""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
 
@@ -89,6 +95,7 @@ class InsMusic(loader.Module):
             await self.delete_after(error_msg, 3)
 
     async def watcher(self, message):
+        """Обработчик сообщений для работы команды без префикса в указанных чатах."""
         if not message.text:
             return
 
@@ -123,11 +130,13 @@ class InsMusic(loader.Module):
                 await self.delete_after(error_msg, 3)
 
     async def delete_after(self, message, seconds):
+        """Удаляет сообщение через указанное количество секунд."""
         await asyncio.sleep(seconds)
         await message.delete()
 
     @loader.command()
     async def addmcmd(self, message):
+        """Добавляет текущий чат в список разрешенных для команды без префикса."""
         chat_id = str(message.chat_id)
         current_chats = self.config["allowed_chats"].copy()
 
@@ -140,6 +149,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def delmcmd(self, message):
+        """Удаляет текущий чат из списка разрешенных."""
         args = utils.get_args_raw(message)
         chat_id = args if args else str(message.chat_id)
         current_chats = self.config["allowed_chats"].copy()
@@ -153,6 +163,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def listmcmd(self, message):
+        """Показывает список разрешенных чатов."""
         chats = self.config["allowed_chats"]
         if not chats:
             await message.edit("Список разрешенных чатов пуст.")
@@ -169,6 +180,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def botsmcmd(self, message):
+        """Показывает список ботов для поиска музыки."""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
             text += f"{i}. {bot}\n"
@@ -176,11 +188,12 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def addbotmcmd(self, message):
+        """Добавляет бота в список для поиска."""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
             return
-
+        
         bot_username = args.replace('@', '')
         if bot_username in self.music_bots:
             await message.edit("Этот бот уже есть в списке!")
@@ -190,11 +203,12 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def delbotmcmd(self, message):
+        """Удаляет бота из списка для поиска."""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
             return
-
+        
         bot_username = args.replace('@', '')
         if bot_username in self.music_bots:
             self.music_bots.remove(bot_username)
