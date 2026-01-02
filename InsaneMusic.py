@@ -11,7 +11,7 @@ class InsMusic(loader.Module):
         self.config = loader.ModuleConfig(
             "allowed_chats", [], "ID чатов, где команда работает без префикса"
         )
-        # Список ботов для поиска музыки
+        
         self.music_bots = ["Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
         self._search_lock = asyncio.Lock()
         super().__init__()
@@ -125,7 +125,7 @@ class InsMusic(loader.Module):
 
             try:
                 await message.delete()
-                search_msg = await message.respond(f"Поиск: {args}")
+                search_msg = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
 
                 music_doc = await self.search_music(args, message)
 
