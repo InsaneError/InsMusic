@@ -73,7 +73,7 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            search_msg = await message.respond(f"Поиск: {args}")
+            search_msg = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
 
             music_doc = await self.search_music(args, message)
 
