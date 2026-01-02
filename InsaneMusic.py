@@ -9,7 +9,6 @@ class InsMusic(loader.Module):
 
     def __init__(self):
         self.db = None
-        self.music_bots = ["ShillMusic_bot", "losslessrobot","AudioBoxrobot", "shazambot", "Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
         self._search_lock = asyncio.Lock()
         super().__init__()
 
@@ -17,11 +16,28 @@ class InsMusic(loader.Module):
         self.client = client
         self.db = db
         
-        if not self.db.get(__name__, "allowed_chats"):
-            self.db.set(__name__, "allowed_chats", [])
+        if not self.db.get("InsMusic", "allowed_chats"):
+            self.db.set("InsMusic", "allowed_chats", [])
         
-        if self.db.get(__name__, "music_bots"):
-            self.music_bots = self.db.get(__name__, "music_bots")
+        if not self.db.get("InsMusic", "music_bots"):
+            default_bots = ["ShillMusic_bot", "losslessrobot","AudioBoxrobot", "shazambot", "Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
+            self.db.set("InsMusic", "music_bots", default_bots)
+
+    @property
+    def allowed_chats(self):
+        return self.db.get("InsMusic", "allowed_chats", [])
+
+    @allowed_chats.setter
+    def allowed_chats(self, value):
+        self.db.set("InsMusic", "allowed_chats", value)
+
+    @property
+    def music_bots(self):
+        return self.db.get("InsMusic", "music_bots", [])
+
+    @music_bots.setter
+    def music_bots(self, value):
+        self.db.set("InsMusic", "music_bots", value)
 
     async def search_in_bot(self, bot_username, query, message):
         try:
@@ -59,14 +75,13 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def мcmd(self, message):
-        """Ищет песни по названию"""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
 
         if not args:
             await message.delete()
             error_msg = await message.respond("Укажите название песни!")
-            await self._delete_after(error_msg, 3)
+            await self.delete_after(error_msg, 3)
             return
 
         try:
@@ -77,7 +92,7 @@ class InsMusic(loader.Module):
 
             if not music_doc:
                 await search_msg.edit("Музыка не найдена")
-                await self._delete_after(search_msg, 3)
+                await self.delete_after(search_msg, 3)
                 return
 
             await search_msg.delete()
@@ -90,17 +105,24 @@ class InsMusic(loader.Module):
         except Exception as e:
             await message.delete()
             error_msg = await message.respond(f"Ошибка: {str(e)}")
-            await self._delete_after(error_msg, 3)
+            await self.delete_after(error_msg, 3)
 
     async def watcher(self, message):
         if not message.text:
             return
 
-        chat_id = self._get_chat_id(message)
-        allowed_chats = self.db.get(__name__, "allowed_chats", [])
-
-        if str(chat_id) not in allowed_chats:
-            return
+        try:
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+        except Exception:
+            chat_id = str(message.peer_id)
+        
+        if chat_id.startswith('-100'):
+            chat_id = chat_id[4:]
+        
+        if chat_id not in self.allowed_chats:
+            original_chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            if original_chat_id not in self.allowed_chats:
+                return
 
         text_lower = message.text.lower()
         if text_lower.startswith("найти "):
@@ -114,7 +136,7 @@ class InsMusic(loader.Module):
 
                 if not music_doc:
                     await search_msg.edit("Музыка не найдена")
-                    await self._delete_after(search_msg, 3)
+                    await self.delete_after(search_msg, 3)
                     return
 
                 await search_msg.delete()
@@ -126,61 +148,63 @@ class InsMusic(loader.Module):
             except Exception as e:
                 await message.delete()
                 error_msg = await message.respond(f"Ошибка: {str(e)}")
-                await self._delete_after(error_msg, 3)
+                await self.delete_after(error_msg, 3)
 
-    async def _delete_after(self, message, seconds):
+    async def delete_after(self, message, seconds):
         await asyncio.sleep(seconds)
         await message.delete()
 
-    def _get_chat_id(self, message):
-        try:
-            return message.chat_id
-        except AttributeError:
-            try:
-                return message.to_id
-            except AttributeError:
-                return message.peer_id
-
     @loader.command()
     async def addmcmd(self, message):
-        """Добавляет текущий чат в список разрешенных для команды без префикса"""
-        chat_id = self._get_chat_id(message)
-        allowed_chats = self.db.get(__name__, "allowed_chats", [])
+        try:
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+        except Exception:
+            chat_id = str(message.peer_id)
+            
+        if chat_id.startswith('-100'):
+            chat_id = chat_id[4:]
+            
+        current_chats = self.allowed_chats.copy()
 
-        if str(chat_id) in allowed_chats:
+        if chat_id in current_chats:
             await message.edit("Этот чат уже в списке разрешенных!")
         else:
-            allowed_chats.append(str(chat_id))
-            self.db.set(__name__, "allowed_chats", allowed_chats)
+            current_chats.append(chat_id)
+            self.allowed_chats = current_chats
             await message.edit(f"Чат добавлен! ID: {chat_id}")
 
     @loader.command()
     async def delmcmd(self, message):
-        """Удаляет текущий чат из списка разрешенных (или по указанному ID)"""
         args = utils.get_args_raw(message)
-        allowed_chats = self.db.get(__name__, "allowed_chats", [])
         
         if args:
             chat_id = args
         else:
-            chat_id = str(self._get_chat_id(message))
+            try:
+                chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            except Exception:
+                chat_id = str(message.peer_id)
+            
+            if chat_id.startswith('-100'):
+                chat_id = chat_id[4:]
+            
+        current_chats = self.allowed_chats.copy()
 
-        if chat_id in allowed_chats:
-            allowed_chats.remove(chat_id)
-            self.db.set(__name__, "allowed_chats", allowed_chats)
+        if chat_id in current_chats:
+            current_chats.remove(chat_id)
+            self.allowed_chats = current_chats
             await message.edit(f"Чат удален! ID: {chat_id}")
         else:
             await message.edit("Этот чат не найден в списке.")
 
     @loader.command()
     async def listmcmd(self, message):
-        """Показывает список разрешенных чатов"""
-        allowed_chats = self.db.get(__name__, "allowed_chats", [])
-        if not allowed_chats:
+        chats = self.allowed_chats
+        if not chats:
             await message.edit("Список разрешенных чатов пуст.")
         else:
             text = "Разрешенные чаты:\n\n"
-            for chat_id in allowed_chats:
+            for chat_id in chats:
                 try:
                     if chat_id.isdigit():
                         chat = await self.client.get_entity(int(chat_id))
@@ -194,7 +218,6 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def botsmcmd(self, message):
-        """Показывает список ботов для поиска музыки"""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
             text += f"{i}. {bot}\n"
@@ -202,7 +225,6 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def addbotmcmd(self, message):
-        """Добавляет бота в список для поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
@@ -212,13 +234,13 @@ class InsMusic(loader.Module):
         if bot_username in self.music_bots:
             await message.edit("Этот бот уже есть в списке!")
         else:
-            self.music_bots.append(bot_username)
-            self.db.set(__name__, "music_bots", self.music_bots)
+            current_bots = self.music_bots.copy()
+            current_bots.append(bot_username)
+            self.music_bots = current_bots
             await message.edit(f"Бот @{bot_username} добавлен в список!")
 
     @loader.command()
     async def delbotmcmd(self, message):
-        """Удаляет бота из списка для поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
@@ -226,8 +248,9 @@ class InsMusic(loader.Module):
         
         bot_username = args.replace('@', '')
         if bot_username in self.music_bots:
-            self.music_bots.remove(bot_username)
-            self.db.set(__name__, "music_bots", self.music_bots)
+            current_bots = self.music_bots.copy()
+            current_bots.remove(bot_username)
+            self.music_bots = current_bots
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
