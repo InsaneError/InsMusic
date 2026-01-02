@@ -73,13 +73,15 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            search_msg = await message.respond(f"Поиск: {args}")
+            # Отправляем премиум эмодзи вместо текста "Поиск: {args}"
+            search_msg = await message.respond("🎵", document=5330324623613533041)
 
             music_doc = await self.search_music(args, message)
 
             if not music_doc:
-                await search_msg.edit("Музыка не найдена")
-                await self.delete_after(search_msg, 3)
+                await search_msg.delete()
+                error_msg = await message.respond("Музыка не найдена")
+                await self.delete_after(error_msg, 3)
                 return
 
             await search_msg.delete()
@@ -125,13 +127,15 @@ class InsMusic(loader.Module):
 
             try:
                 await message.delete()
-                search_msg = await message.respond(f"Поиск: {args}")
+                # Отправляем премиум эмодзи вместо текста "Поиск: {args}"
+                search_msg = await message.respond("🎵", document=5330324623613533041)
 
                 music_doc = await self.search_music(args, message)
 
                 if not music_doc:
-                    await search_msg.edit("Музыка не найдена")
-                    await self.delete_after(search_msg, 3)
+                    await search_msg.delete()
+                    error_msg = await message.respond("Музыка не найдена")
+                    await self.delete_after(error_msg, 3)
                     return
 
                 await search_msg.delete()
