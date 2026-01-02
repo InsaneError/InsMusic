@@ -73,8 +73,12 @@ class InsMusic(loader.Module):
         async with self._search_lock:
             return await self.search_music_fast(query, message)
 
-    @loader.command()
+    @loader.command(
+        ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
+        en_doc="<title> - Search music by title (works with prefix)"
+    )
     async def мcmd(self, message):
+        """Поиск музыки по названию"""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
 
@@ -154,8 +158,12 @@ class InsMusic(loader.Module):
         await asyncio.sleep(seconds)
         await message.delete()
 
-    @loader.command()
+    @loader.command(
+        ru_doc="Добавляет текущий чат в список разрешенных для команды без префикса",
+        en_doc="Adds current chat to the list of allowed chats for prefix-less command"
+    )
     async def addmcmd(self, message):
+        """Добавить чат для работы без префикса"""
         try:
             chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
         except Exception:
@@ -173,8 +181,12 @@ class InsMusic(loader.Module):
             self.allowed_chats = current_chats
             await message.edit(f"Чат добавлен! ID: {chat_id}")
 
-    @loader.command()
+    @loader.command(
+        ru_doc="[id чата] - Удаляет текущий/указанный чат из списка разрешенных",
+        en_doc="[chat id] - Removes current/specified chat from allowed list"
+    )
     async def delmcmd(self, message):
+        """Удалить чат из разрешенных"""
         args = utils.get_args_raw(message)
         
         if args:
@@ -197,8 +209,12 @@ class InsMusic(loader.Module):
         else:
             await message.edit("Этот чат не найден в списке.")
 
-    @loader.command()
+    @loader.command(
+        ru_doc="Показывает список чатов, где команда работает без префикса",
+        en_doc="Shows list of chats where command works without prefix"
+    )
     async def listmcmd(self, message):
+        """Список разрешенных чатов"""
         chats = self.allowed_chats
         if not chats:
             await message.edit("Список разрешенных чатов пуст.")
@@ -216,15 +232,23 @@ class InsMusic(loader.Module):
                     text += f"• Неизвестный чат ({chat_id})\n"
             await message.edit(text)
 
-    @loader.command()
+    @loader.command(
+        ru_doc="Показывает список ботов для поиска музыки",
+        en_doc="Shows list of music search bots"
+    )
     async def botsmcmd(self, message):
+        """Список ботов для поиска"""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
             text += f"{i}. {bot}\n"
         await message.edit(text)
 
-    @loader.command()
+    @loader.command(
+        ru_doc="<юзернейм> - Добавляет бота в список для поиска музыки",
+        en_doc="<username> - Adds bot to music search list"
+    )
     async def addbotmcmd(self, message):
+        """Добавить бота для поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
@@ -239,8 +263,12 @@ class InsMusic(loader.Module):
             self.music_bots = current_bots
             await message.edit(f"Бот @{bot_username} добавлен в список!")
 
-    @loader.command()
+    @loader.command(
+        ru_doc="<юзернейм> - Удаляет бота из списка для поиска музыки",
+        en_doc="<username> - Removes bot from music search list"
+    )
     async def delbotmcmd(self, message):
+        """Удалить бота из поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
