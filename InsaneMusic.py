@@ -14,7 +14,6 @@ class InsMusic(loader.Module):
         # Список ботов для поиска музыки
         self.music_bots = ["Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
         self._search_lock = asyncio.Lock()
-        self.emoji_id = 5330324623613533041  # ID премиум эмодзи
         super().__init__()
 
     async def client_ready(self, client, db):
@@ -60,19 +59,6 @@ class InsMusic(loader.Module):
         async with self._search_lock:
             return await self.search_music_fast(query, message)
 
-    async def send_premium_emoji(self, message):
-        """Отправляет премиум эмодзи."""
-        try:
-            # Используем send_file для отправки эмодзи-премиума
-            return await message.client.send_file(
-                message.to_id,
-                self.emoji_id,
-                reply_to=message.id
-            )
-        except Exception as e:
-            # Если не удалось отправить эмодзи, отправляем обычное сообщение
-            return await message.respond("🔍 Поиск музыки...")
-
     @loader.command()
     async def мcmd(self, message):
         """Ищет песни по названию."""
@@ -87,15 +73,13 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            # Отправляем премиум эмодзи
-            search_msg = await self.send_premium_emoji(message)
+            search_msg = await message.respond(f"Поиск: {args}")
 
             music_doc = await self.search_music(args, message)
 
             if not music_doc:
-                await search_msg.delete()
-                error_msg = await message.respond("Музыка не найдена")
-                await self.delete_after(error_msg, 3)
+                await search_msg.edit("Музыка не найдена")
+                await self.delete_after(search_msg, 3)
                 return
 
             await search_msg.delete()
@@ -141,15 +125,13 @@ class InsMusic(loader.Module):
 
             try:
                 await message.delete()
-                # Отправляем премиум эмодзи
-                search_msg = await self.send_premium_emoji(message)
+                search_msg = await message.respond(f"Поиск: {args}")
 
                 music_doc = await self.search_music(args, message)
 
                 if not music_doc:
-                    await search_msg.delete()
-                    error_msg = await message.respond("Музыка не найдена")
-                    await self.delete_after(error_msg, 3)
+                    await search_msg.edit("Музыка не найдена")
+                    await self.delete_after(search_msg, 3)
                     return
 
                 await search_msg.delete()
