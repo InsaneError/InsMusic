@@ -99,9 +99,25 @@ class InsMusic(loader.Module):
         if not message.text:
             return
 
-        chat_id = str(message.chat_id)
+        # Получаем ID чата безопасным способом
+        try:
+            # Используем message.chat_id если доступно, иначе используем message.to_id
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+        except Exception:
+            # Если и это не работает, используем message.peer_id
+            chat_id = str(message.peer_id)
+        
+        # Проверяем, является ли ID чата отрицательным (групповой чат)
+        # Если это личный чат, преобразуем в строку
+        if chat_id.startswith('-100'):
+            chat_id = chat_id[4:]  # Убираем '-100' для Telegram групповых чатов
+        
+        # Проверяем, находится ли чат в списке разрешенных
         if chat_id not in self.config["allowed_chats"]:
-            return
+            # Также проверяем без преобразования, если это личный чат
+            original_chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            if original_chat_id not in self.config["allowed_chats"]:
+                return
 
         text_lower = message.text.lower()
         if text_lower.startswith("найти "):
@@ -137,7 +153,16 @@ class InsMusic(loader.Module):
     @loader.command()
     async def addmcmd(self, message):
         """Добавляет текущий чат в список разрешенных для команды без префикса."""
-        chat_id = str(message.chat_id)
+        # Получаем ID чата безопасным способом
+        try:
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+        except Exception:
+            chat_id = str(message.peer_id)
+            
+        # Преобразуем для групповых чатов
+        if chat_id.startswith('-100'):
+            chat_id = chat_id[4:]
+            
         current_chats = self.config["allowed_chats"].copy()
 
         if chat_id in current_chats:
@@ -151,7 +176,20 @@ class InsMusic(loader.Module):
     async def delmcmd(self, message):
         """Удаляет текущий чат из списка разрешенных."""
         args = utils.get_args_raw(message)
-        chat_id = args if args else str(message.chat_id)
+        
+        if args:
+            chat_id = args
+        else:
+            # Получаем ID чата безопасным способом
+            try:
+                chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            except Exception:
+                chat_id = str(message.peer_id)
+            
+            # Преобразуем для групповых чатов
+            if chat_id.startswith('-100'):
+                chat_id = chat_id[4:]
+            
         current_chats = self.config["allowed_chats"].copy()
 
         if chat_id in current_chats:
@@ -171,10 +209,14 @@ class InsMusic(loader.Module):
             text = "Разрешенные чаты:\n\n"
             for chat_id in chats:
                 try:
-                    chat = await self.client.get_entity(int(chat_id))
-                    title = getattr(chat, 'title', 'Личные сообщения')
-                    text += f"• {title} ({chat_id})\n"
-                except:
+                    # Пробуем получить информацию о чате
+                    if chat_id.isdigit():
+                        chat = await self.client.get_entity(int(chat_id))
+                        title = getattr(chat, 'title', 'Личные сообщения')
+                        text += f"• {title} ({chat_id})\n"
+                    else:
+                        text += f"• Неизвестный чат ({chat_id})\n"
+                except Exception as e:
                     text += f"• Неизвестный чат ({chat_id})\n"
             await message.edit(text)
 
