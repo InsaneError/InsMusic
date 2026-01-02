@@ -1,9 +1,10 @@
 from .. import loader, utils
 import asyncio
-import json
 
 
 class InsMusic(loader.Module):
+    """Модуль для поиска музыки от @InsModule."""
+
     strings = {'name': 'InsMusic'}
 
     def __init__(self):
@@ -58,6 +59,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def мcmd(self, message):
+        """Ищет песни по названию"""
         args = utils.get_args_raw(message)
         reply = await message.get_reply_message()
 
@@ -141,6 +143,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def addmcmd(self, message):
+        """Добавляет текущий чат в список разрешенных для команды без префикса"""
         chat_id = self._get_chat_id(message)
         allowed_chats = self.db.get(__name__, "allowed_chats", [])
 
@@ -153,6 +156,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def delmcmd(self, message):
+        """Удаляет текущий чат из списка разрешенных (или по указанному ID)"""
         args = utils.get_args_raw(message)
         allowed_chats = self.db.get(__name__, "allowed_chats", [])
         
@@ -170,6 +174,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def listmcmd(self, message):
+        """Показывает список разрешенных чатов"""
         allowed_chats = self.db.get(__name__, "allowed_chats", [])
         if not allowed_chats:
             await message.edit("Список разрешенных чатов пуст.")
@@ -189,6 +194,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def botsmcmd(self, message):
+        """Показывает список ботов для поиска музыки"""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
             text += f"{i}. {bot}\n"
@@ -196,6 +202,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def addbotmcmd(self, message):
+        """Добавляет бота в список для поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
@@ -211,6 +218,7 @@ class InsMusic(loader.Module):
 
     @loader.command()
     async def delbotmcmd(self, message):
+        """Удаляет бота из списка для поиска"""
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
