@@ -12,7 +12,7 @@ class InsMusic(loader.Module):
             "allowed_chats", [], "ID чатов, где команда работает без префикса"
         )
         
-        self.music_bots = ["shazambot","AudioBox","RobotLybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
+        self.music_bots = ["AudioBox","shazambot","RobotLybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
         self._search_lock = asyncio.Lock()
         super().__init__()
 
