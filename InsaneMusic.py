@@ -8,70 +8,155 @@ class InsMusic(loader.Module):
     strings = {'name': 'InsMusic'}
 
     def __init__(self):
-        self.db = None
+        self.database = None
         self._search_lock = asyncio.Lock()
         super().__init__()
 
     async def client_ready(self, client, db):
         self.client = client
-        self.db = db
+        self.database = db
         
-        if not self.db.get("InsMusic", "allowed_chats"):
-            self.db.set("InsMusic", "allowed_chats", [])
+        if not self.database.get("InsMusic", "allowed_chats"):
+            self.database.set("InsMusic", "allowed_chats", [])
         
-        if not self.db.get("InsMusic", "music_bots"):
+        if not self.database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
-            self.db.set("InsMusic", "music_bots", default_bots)
+            self.database.set("InsMusic", "music_bots", default_bots)
 
     @property
     def allowed_chats(self):
-        return self.db.get("InsMusic", "allowed_chats", [])
+        return self.database.get("InsMusic", "allowed_chats", [])
 
     @allowed_chats.setter
     def allowed_chats(self, value):
-        self.db.set("InsMusic", "allowed_chats", value)
+        self.database.set("InsMusic", "allowed_chats", value)
 
     @property
     def music_bots(self):
-        return self.db.get("InsMusic", "music_bots", [])
+        return self.database.get("InsMusic", "music_bots", [])
 
     @music_bots.setter
     def music_bots(self, value):
-        self.db.set("InsMusic", "music_bots", value)
+        self.database.set("InsMusic", "music_bots", value)
 
     async def search_in_bot(self, bot_username, query, message):
+        """Поиск музыки в конкретном боте"""
         try:
-            music = await message.client.inline_query(bot_username, query)
-            if music and len(music) > 0 and hasattr(music[0].result, 'document'):
-                return music[0].result.document
+            results = await message.client.inline_query(bot_username, query)
+            if results and len(results) > 0:
+                return results[:5]  # Возвращаем первые 5 результатов
         except Exception:
-            return None
+            return []
+        return []
+
+    def find_best_result(self, all_results, original_query):
+        """Выбирает самый подходящий результат из всех найденных"""
+        best_result = None
+        best_score = -1
+        
+        original_query = original_query.lower()
+        
+        for bot_results in all_results:
+            if not bot_results:
+                continue
+                
+            for result in bot_results:
+                if not hasattr(result, 'document'):
+                    continue
+                    
+                score = 0
+                
+                # Получаем информацию о треке
+                track_info = ""
+                if hasattr(result, 'title'):
+                    track_info = result.title
+                elif hasattr(result, 'description'):
+                    track_info = result.description
+                elif hasattr(result.result, 'message'):
+                    if hasattr(result.result.message, 'message'):
+                        track_info = result.result.message.message
+                
+                if not track_info:
+                    # Если нет информации, используем документ
+                    if hasattr(result.document, 'attributes'):
+                        for attr in result.document.attributes:
+                            if hasattr(attr, 'title'):
+                                track_info = attr.title
+                                if hasattr(attr, 'performer'):
+                                    track_info = f"{attr.performer} - {track_info}"
+                                break
+                
+                if track_info:
+                    track_info_lower = track_info.lower()
+                    
+                    # Проверяем соответствие запросу
+                    if original_query in track_info_lower:
+                        score += 50
+                    
+                    # Дополнительные критерии качества
+                    if "official" in track_info_lower:
+                        score += 20
+                    if "audio" in track_info_lower:
+                        score += 10
+                    if "mp3" in track_info_lower:
+                        score += 5
+                    
+                    # Предпочитаем более длинные результаты (обычно содержат больше информации)
+                    if len(track_info) > 20:
+                        score += 5
+                    
+                    # Проверяем качество документа
+                    if hasattr(result.document, 'size'):
+                        if result.document.size > 1000000:  # Больше 1MB - хороший признак
+                            score += 15
+                        elif result.document.size > 500000:  # Больше 500KB - нормально
+                            score += 5
+                    
+                    if hasattr(result.document, 'mime_type'):
+                        if "audio" in result.document.mime_type:
+                            score += 10
+                
+                # Обновляем лучший результат
+                if score > best_score:
+                    best_score = score
+                    best_result = result
+        
+        if best_result and hasattr(best_result, 'document'):
+            return best_result.document
         return None
 
-    async def search_music_fast(self, query, message):
-        tasks = []
+    async def search_music_all_bots(self, query, message):
+        """Ищет музыку во всех ботах и выбирает лучший результат"""
+        search_tasks = []
+        
+        # Создаем задачи для поиска в каждом боте
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
-            tasks.append((bot_username, task))
+            search_tasks.append(task)
         
-        for bot_username, task in tasks:
-            try:
-                result = await asyncio.wait_for(task, timeout=3.0)
-                if result:
-                    for other_bot, other_task in tasks:
-                        if other_bot != bot_username and not other_task.done():
-                            other_task.cancel()
-                    return result
-            except asyncio.TimeoutError:
-                continue
-            except Exception:
-                continue
+        # Ждем результаты от всех ботов
+        try:
+            all_bot_results = await asyncio.gather(*search_tasks, return_exceptions=True)
+        except Exception:
+            return None
+        
+        # Собираем все успешные результаты
+        valid_results = []
+        for result in all_bot_results:
+            if isinstance(result, list) and result:
+                valid_results.append(result)
+        
+        # Выбираем лучший результат из всех
+        if valid_results:
+            best_document = self.find_best_result(valid_results, query)
+            return best_document
         
         return None
 
     async def search_music(self, query, message):
+        """Основная функция поиска с блокировкой"""
         async with self._search_lock:
-            return await self.search_music_fast(query, message)
+            return await self.search_music_all_bots(query, message)
 
     @loader.command(
         ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
