@@ -1,5 +1,6 @@
 from .. import loader, utils
 import asyncio
+import re
 
 
 class InsMusic(loader.Module):
@@ -20,7 +21,7 @@ class InsMusic(loader.Module):
             self.database.set("InsMusic", "allowed_chats", [])
         
         if not self.database.get("InsMusic", "music_bots"):
-            default_bots = ["Shazambot","ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot"]
+            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
 
     @property
@@ -40,123 +41,237 @@ class InsMusic(loader.Module):
         self.database.set("InsMusic", "music_bots", value)
 
     async def search_in_bot(self, bot_username, query, message):
-        """Поиск музыки в конкретном боте"""
-        try:
-            results = await message.client.inline_query(bot_username, query)
-            if results and len(results) > 0:
-                return results[:5]  # Возвращаем первые 5 результатов
-        except Exception:
-            return []
-        return []
-
-    def find_best_result(self, all_results, original_query):
-        """Выбирает самый подходящий результат из всех найденных"""
-        best_result = None
-        best_score = -1
+        """Поиск музыки в конкретном боте с несколькими попытками"""
+        search_attempts = []
         
-        original_query = original_query.lower()
+        # Разные варианты запроса для лучшего поиска
+        search_variants = [
+            query,
+            f"{query} music",
+            f"{query} mp3",
+            f"{query} audio",
+            f"{query} песня",
+            f"{query} трек"
+        ]
         
-        for bot_results in all_results:
-            if not bot_results:
+        for search_variant in search_variants:
+            try:
+                results = await message.client.inline_query(bot_username, search_variant)
+                if results and len(results) > 0:
+                    # Возвращаем больше результатов для лучшего выбора
+                    search_attempts.extend(results[:10])
+            except Exception:
                 continue
-                
-            for result in bot_results:
-                if not hasattr(result, 'document'):
-                    continue
-                    
-                score = 0
-                
-                # Получаем информацию о треке
-                track_info = ""
-                if hasattr(result, 'title'):
-                    track_info = result.title
-                elif hasattr(result, 'description'):
-                    track_info = result.description
-                elif hasattr(result.result, 'message'):
-                    if hasattr(result.result.message, 'message'):
-                        track_info = result.result.message.message
-                
-                if not track_info:
-                    # Если нет информации, используем документ
-                    if hasattr(result.document, 'attributes'):
-                        for attr in result.document.attributes:
-                            if hasattr(attr, 'title'):
-                                track_info = attr.title
-                                if hasattr(attr, 'performer'):
-                                    track_info = f"{attr.performer} - {track_info}"
-                                break
-                
-                if track_info:
-                    track_info_lower = track_info.lower()
-                    
-                    # Проверяем соответствие запросу
-                    if original_query in track_info_lower:
-                        score += 50
-                    
-                    # Дополнительные критерии качества
-                    if "official" in track_info_lower:
-                        score += 20
-                    if "audio" in track_info_lower:
-                        score += 10
-                    if "mp3" in track_info_lower:
-                        score += 5
-                    
-                    # Предпочитаем более длинные результаты (обычно содержат больше информации)
-                    if len(track_info) > 20:
-                        score += 5
-                    
-                    # Проверяем качество документа
-                    if hasattr(result.document, 'size'):
-                        if result.document.size > 1000000:  # Больше 1MB - хороший признак
-                            score += 15
-                        elif result.document.size > 500000:  # Больше 500KB - нормально
-                            score += 5
-                    
-                    if hasattr(result.document, 'mime_type'):
-                        if "audio" in result.document.mime_type:
-                            score += 10
-                
-                # Обновляем лучший результат
-                if score > best_score:
-                    best_score = score
-                    best_result = result
+            
+            # Если нашли достаточно результатов, можно прерваться
+            if len(search_attempts) >= 5:
+                break
         
-        if best_result and hasattr(best_result, 'document'):
-            return best_result.document
-        return None
+        return search_attempts[:15]  # Ограничиваем общее количество
 
-    async def search_music_all_bots(self, query, message):
-        """Ищет музыку во всех ботах и выбирает лучший результат"""
+    def extract_track_info(self, result):
+        """Извлекает информацию о треке из результата"""
+        artist = ""
+        title = ""
+        full_text = ""
+        
+        # Пробуем разные способы извлечения информации
+        if hasattr(result, 'title') and result.title:
+            full_text = result.title
+        elif hasattr(result, 'description') and result.document:
+            full_text = result.description
+        
+        # Если есть доступ к документу, пробуем получить атрибуты
+        if hasattr(result, 'document'):
+            doc = result.document
+            if hasattr(doc, 'attributes'):
+                for attr in doc.attributes:
+                    if hasattr(attr, 'performer') and attr.performer:
+                        artist = attr.performer
+                    if hasattr(attr, 'title') and attr.title:
+                        title = attr.title
+        
+        # Парсим текст для поиска информации
+        if not artist or not title:
+            # Пробуем найти формат "Исполнитель - Название"
+            if " - " in full_text:
+                parts = full_text.split(" - ", 1)
+                if not artist:
+                    artist = parts[0].strip()
+                if not title:
+                    title = parts[1].strip()
+            
+            # Пробуем найти в скобках
+            elif "(" in full_text and ")" in full_text:
+                match = re.search(r'\((.*?)\)', full_text)
+                if match and not artist:
+                    artist = match.group(1).strip()
+            
+            # Убираем мусорные слова
+            cleanup_words = ["скачать", "слушать", "mp3", "m4a", "flac", "320kbps", "official", "audio", "lyrics"]
+            if title:
+                for word in cleanup_words:
+                    title = title.replace(word, "").strip()
+        
+        return artist, title, full_text
+
+    def calculate_match_score(self, original_query, artist, title, full_text, document):
+        """Вычисляет оценку соответствия результата запросу"""
+        score = 0
+        query_lower = original_query.lower()
+        
+        # Подготавливаем тексты для сравнения
+        artist_lower = artist.lower() if artist else ""
+        title_lower = title.lower() if title else ""
+        full_text_lower = full_text.lower() if full_text else ""
+        
+        # Проверяем совпадение в разных частях
+        if query_lower in artist_lower:
+            score += 40  # Нашли в исполнителе - самый важный критерий
+        elif query_lower in title_lower:
+            score += 30  # Нашли в названии
+        elif query_lower in full_text_lower:
+            score += 20  # Нашли в полном тексте
+        
+        # Проверяем частичное совпадение слов
+        query_words = set(query_lower.split())
+        if artist_lower:
+            artist_words = set(artist_lower.split())
+            common_words = query_words.intersection(artist_words)
+            if common_words:
+                score += len(common_words) * 10
+        
+        if title_lower:
+            title_words = set(title_lower.split())
+            common_words = query_words.intersection(title_words)
+            if common_words:
+                score += len(common_words) * 8
+        
+        # Бонус за качество файла
+        if hasattr(document, 'size'):
+            if document.size > 2000000:  # Больше 2MB
+                score += 25
+            elif document.size > 1000000:  # Больше 1MB
+                score += 15
+            elif document.size > 500000:  # Больше 500KB
+                score += 5
+        
+        # Бонус за формат "Исполнитель - Название"
+        if artist and title:
+            score += 20
+        
+        # Бонус за определенные ключевые слова (качество)
+        quality_indicators = ["320", "flac", "hq", "high quality", "lossless"]
+        for indicator in quality_indicators:
+            if indicator in full_text_lower:
+                score += 10
+                break
+        
+        # Штраф за нежелательные слова
+        bad_indicators = ["remix", "cover", "karaoke", "instrumental", "минус", "минусовка"]
+        for indicator in bad_indicators:
+            if indicator in full_text_lower:
+                score -= 15
+                break
+        
+        return score
+
+    async def search_all_bots_concurrent(self, query, message):
+        """Ищет музыку во всех ботах одновременно"""
         search_tasks = []
         
-        # Создаем задачи для поиска в каждом боте
+        # Запускаем поиск во всех ботах
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
             search_tasks.append(task)
         
-        # Ждем результаты от всех ботов
+        # Ждем результаты с таймаутом
         try:
-            all_bot_results = await asyncio.gather(*search_tasks, return_exceptions=True)
-        except Exception:
-            return None
+            all_results = await asyncio.wait_for(
+                asyncio.gather(*search_tasks, return_exceptions=True),
+                timeout=10.0  # Увеличиваем таймаут
+            )
+        except asyncio.TimeoutError:
+            # Возвращаем то, что успели собрать
+            completed = []
+            for task in search_tasks:
+                if task.done() and not task.cancelled():
+                    try:
+                        completed.append(task.result())
+                    except:
+                        continue
+            all_results = completed
         
-        # Собираем все успешные результаты
-        valid_results = []
-        for result in all_bot_results:
-            if isinstance(result, list) and result:
-                valid_results.append(result)
+        # Собираем все результаты
+        all_valid_results = []
+        for result in all_results:
+            if isinstance(result, list):
+                all_valid_results.extend(result)
         
-        # Выбираем лучший результат из всех
-        if valid_results:
-            best_document = self.find_best_result(valid_results, query)
-            return best_document
+        return all_valid_results
+
+    def find_best_track(self, all_results, original_query):
+        """Находит лучший трек из всех результатов"""
+        best_result = None
+        best_score = -1
+        
+        for result in all_results:
+            if not hasattr(result, 'document'):
+                continue
+            
+            # Извлекаем информацию о треке
+            artist, title, full_text = self.extract_track_info(result)
+            
+            # Вычисляем оценку
+            score = self.calculate_match_score(original_query, artist, title, full_text, result.document)
+            
+            # Обновляем лучший результат
+            if score > best_score:
+                best_score = score
+                best_result = result
+        
+        # Если лучший результат имеет низкий балл (меньше 20), возможно лучше ничего не возвращать
+        if best_result and best_score >= 10:  # Снижаем минимальный порог
+            return best_result.document
         
         return None
 
     async def search_music(self, query, message):
-        """Основная функция поиска с блокировкой"""
+        """Основная функция поиска с улучшенной логикой"""
         async with self._search_lock:
-            return await self.search_music_all_bots(query, message)
+            # Собираем все результаты от всех ботов
+            all_results = await self.search_all_bots_concurrent(query, message)
+            
+            if not all_results:
+                # Пробуем альтернативный подход - убираем лишние слова
+                clean_query = self.clean_search_query(query)
+                if clean_query != query:
+                    all_results = await self.search_all_bots_concurrent(clean_query, message)
+            
+            # Выбираем лучший результат
+            if all_results:
+                return self.find_best_track(all_results, query)
+            
+            return None
+
+    def clean_search_query(self, query):
+        """Очищает запрос от лишних слов"""
+        # Удаляем указания на качество и формат
+        cleanup_patterns = [
+            r'\d{3,4}kbps?', r'\d{3,4}k', 
+            r'скачать', r'слушать', r'mp3', r'm4a', r'flac',
+            r'официальный', r'official', r'audio', r'музыка'
+        ]
+        
+        cleaned = query
+        for pattern in cleanup_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.IGNORECASE)
+        
+        # Убираем лишние пробелы
+        cleaned = ' '.join(cleaned.split())
+        
+        # Если очистка удалила всё, возвращаем оригинал
+        return cleaned if cleaned.strip() else query
 
     @loader.command(
         ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
@@ -175,25 +290,29 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            search_msg = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+            search_msg = await message.respond(f"<emoji document_id=5330324623613533041>🔍</emoji> Ищу музыку...")
 
             music_doc = await self.search_music(args, message)
 
             if not music_doc:
-                await search_msg.edit("Музыка не найдена")
-                await self.delete_after(search_msg, 3)
+                await search_msg.edit("❌ Музыка не найдена\n\nПопробуйте:\n• Указать исполнителя\n• Проверить название\n• Использовать английские слова")
+                await self.delete_after(search_msg, 5)
                 return
 
+            await search_msg.edit("<emoji document_id=5330324623613533041>✅</emoji> Найдено! Отправляю...")
+            await asyncio.sleep(1)
             await search_msg.delete()
+            
             await message.client.send_file(
                 message.to_id,
                 music_doc,
-                reply_to=reply.id if reply else None
+                reply_to=reply.id if reply else None,
+                caption=f"🎵 По запросу: {args}"
             )
 
         except Exception as e:
             await message.delete()
-            error_msg = await message.respond(f"Ошибка: {str(e)}")
+            error_msg = await message.respond(f"⚠️ Ошибка: {str(e)}")
             await self.delete_after(error_msg, 3)
 
     async def watcher(self, message):
@@ -219,24 +338,25 @@ class InsMusic(loader.Module):
 
             try:
                 await message.delete()
-                search_msg = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+                search_msg = await message.respond(f"<emoji document_id=5330324623613533041>🔍</emoji> Ищу...")
 
                 music_doc = await self.search_music(args, message)
 
                 if not music_doc:
-                    await search_msg.edit("Музыка не найдена")
+                    await search_msg.edit("❌ Музыка не найдена")
                     await self.delete_after(search_msg, 3)
                     return
 
                 await search_msg.delete()
                 await message.client.send_file(
                     message.to_id,
-                    music_doc
+                    music_doc,
+                    caption=f"🎵 По запросу: {args}"
                 )
 
             except Exception as e:
                 await message.delete()
-                error_msg = await message.respond(f"Ошибка: {str(e)}")
+                error_msg = await message.respond(f"⚠️ Ошибка: {str(e)}")
                 await self.delete_after(error_msg, 3)
 
     async def delete_after(self, message, seconds):
