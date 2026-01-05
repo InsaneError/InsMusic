@@ -47,8 +47,7 @@ class InsMusic(loader.Module):
                     'bot': bot_username,
                     'document': results[0].result.document,
                     'title': results[0].result.document.attributes[0].title if hasattr(results[0].result.document.attributes[0], 'title') else '',
-                    'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else '',
-                    'text': results[0].result.message if hasattr(results[0].result, 'message') else ''
+                    'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else ''
                 }
         except Exception:
             return None
@@ -93,7 +92,7 @@ class InsMusic(loader.Module):
                 best_score = score
                 best_result = result
         
-        return best_result if best_result else None
+        return best_result['document'] if best_result else None
 
     async def search_music_all_bots(self, query, message):
         """Ждет результаты от всех ботов и выбирает лучший"""
@@ -155,29 +154,18 @@ class InsMusic(loader.Module):
             await message.delete()
             searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
 
-            best_result = await self.search_music(search_query, message)
+            music_document = await self.search_music(search_query, message)
 
-            if not best_result or not best_result.get('document'):
+            if not music_document:
                 await searching_message.edit("Музыка не найдена")
                 await self.delete_after(searching_message, 3)
                 return
 
             await searching_message.delete()
-            
-            # Формируем подпись с текстом песни если есть
-            caption = ""
-            if best_result.get('text'):
-                # Используем первые 200 символов текста песни
-                song_text = best_result['text']
-                if len(song_text) > 200:
-                    song_text = song_text[:200] + "..."
-                caption = f"Текст песни:\n\n{song_text}"
-            
             await message.client.send_file(
                 message.to_id,
-                best_result['document'],
-                reply_to=reply_message.id if reply_message else None,
-                caption=caption if caption else None
+                music_document,
+                reply_to=reply_message.id if reply_message else None
             )
 
         except Exception as error:
@@ -210,28 +198,17 @@ class InsMusic(loader.Module):
                 await message.delete()
                 searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
 
-                best_result = await self.search_music(search_query, message)
+                music_document = await self.search_music(search_query, message)
 
-                if not best_result or not best_result.get('document'):
+                if not music_document:
                     await searching_message.edit("Музыка не найдена")
                     await self.delete_after(searching_message, 3)
                     return
 
                 await searching_message.delete()
-                
-                # Формируем подпись с текстом песни если есть
-                caption = ""
-                if best_result.get('text'):
-                    # Используем первые 200 символов текста песни
-                    song_text = best_result['text']
-                    if len(song_text) > 200:
-                        song_text = song_text[:200] + "..."
-                    caption = f"Текст песни:\n\n{song_text}"
-                
                 await message.client.send_file(
                     message.to_id,
-                    best_result['document'],
-                    caption=caption if caption else None
+                    music_document
                 )
 
             except Exception as error:
