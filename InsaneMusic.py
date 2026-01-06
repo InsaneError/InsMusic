@@ -1,5 +1,6 @@
 from .. import loader, utils
 import asyncio
+import time
 
 
 class InsMusic(loader.Module):
@@ -10,6 +11,7 @@ class InsMusic(loader.Module):
     def __init__(self):
         self.database = None
         self.search_lock = asyncio.Lock()
+        self.spam_protection = {}
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -39,9 +41,23 @@ class InsMusic(loader.Module):
     def music_bots(self, value):
         self.database.set("InsMusic", "music_bots", value)
 
+    def check_spam(self, user_id):
+        """Проверка на спам"""
+        current_time = time.time()
+        if user_id in self.spam_protection:
+            last_time = self.spam_protection[user_id]
+            if current_time - last_time < 5:
+                return False
+        self.spam_protection[user_id] = current_time
+        return True
+
     async def search_in_bot(self, bot_username, query, message):
         try:
-            results = await message.client.inline_query(bot_username, query)
+            # Используем более быстрый метод получения inline результатов
+            results = await asyncio.wait_for(
+                message.client.inline_query(bot_username, query),
+                timeout=2.0
+            )
             if results and len(results) > 0 and hasattr(results[0].result, 'document'):
                 return {
                     'bot': bot_username,
@@ -49,7 +65,7 @@ class InsMusic(loader.Module):
                     'title': results[0].result.document.attributes[0].title if hasattr(results[0].result.document.attributes[0], 'title') else '',
                     'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else ''
                 }
-        except Exception:
+        except (asyncio.TimeoutError, Exception):
             return None
         return None
 
@@ -107,7 +123,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=5.0
+                timeout=3.0  # Уменьшено с 5 до 3 секунд
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
@@ -141,6 +157,14 @@ class InsMusic(loader.Module):
     )
     async def мcmd(self, message):
         """Поиск музыки по названию"""
+        # Проверка на спам
+        user_id = message.sender_id
+        if not self.check_spam(user_id):
+            await message.delete()
+            error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
+            await self.delete_after(error_message, 3)
+            return
+        
         search_query = utils.get_args_raw(message)
         reply_message = await message.get_reply_message()
 
@@ -162,10 +186,11 @@ class InsMusic(loader.Module):
                 return
 
             await searching_message.delete()
+            # Отправляем реплаем на команду
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=reply_message.id if reply_message else None
+                reply_to=message.id  # Всегда отправляем реплаем на команду
             )
 
         except Exception as error:
@@ -192,6 +217,12 @@ class InsMusic(loader.Module):
 
         text_lower = message.text.lower()
         if text_lower.startswith("найти "):
+            # Проверка на спам
+            user_id = message.sender_id
+            if not self.check_spam(user_id):
+                await message.delete()
+                return
+            
             search_query = message.text[6:]
 
             try:
@@ -206,9 +237,11 @@ class InsMusic(loader.Module):
                     return
 
                 await searching_message.delete()
+                # Отправляем реплаем на команду "найти"
                 await message.client.send_file(
                     message.to_id,
-                    music_document
+                    music_document,
+                    reply_to=message.id  # Реплаем на команду "найти"
                 )
 
             except Exception as error:
