@@ -1,9 +1,6 @@
 from .. import loader, utils
 import asyncio
 import time
-import git
-import os
-import sys
 
 
 class InsMusic(loader.Module):
@@ -15,7 +12,6 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
-        self.update_task = None
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -28,49 +24,6 @@ class InsMusic(loader.Module):
         if not self.database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
-        
-        # Запускаем задачу автообновления
-        self.update_task = asyncio.create_task(self.auto_update())
-
-    async def auto_update(self):
-        """Фоновая задача автообновления каждые 10 минут"""
-        while True:
-            try:
-                await asyncio.sleep(10)  # 10 минут
-                await self.silent_update()
-            except Exception:
-                # Игнорируем ошибки в автообновлении
-                continue
-
-    async def silent_update(self):
-        """Тихое обновление без уведомлений"""
-        try:
-            repo_path = os.path.dirname(os.path.abspath(__file__))
-            repo = git.Repo(repo_path)
-            
-            # Получаем текущую ветку
-            current_branch = repo.active_branch.name
-            
-            # Получаем последние изменения
-            origin = repo.remotes.origin
-            origin.fetch()
-            
-            # Сравниваем коммиты
-            local_commit = repo.head.commit
-            remote_commit = repo.refs[f'origin/{current_branch}'].commit
-            
-            if local_commit.hexsha != remote_commit.hexsha:
-                # Сбрасываем изменения и переключаемся на актуальную версию
-                repo.git.reset('--hard', f'origin/{current_branch}')
-                
-                # Перезагружаем модуль
-                await self.allmodules.commands["loadmod"](await self.client.send_message(
-                    "me", f".loadmod {self.__class__.__name__.lower()}"
-                ))
-                
-        except Exception:
-            # Молча игнорируем ошибки обновления
-            pass
 
     @property
     def allowed_chats(self):
@@ -425,5 +378,3 @@ class InsMusic(loader.Module):
         else:
             await message.edit("Этот бот не найден в списке!")
 
-
-#хехехн
