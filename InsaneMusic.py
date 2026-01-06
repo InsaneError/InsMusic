@@ -1,8 +1,9 @@
 from .. import loader, utils
 import asyncio
 import time
-import requests
-import hashlib
+import git
+import os
+import sys
 
 
 class InsMusic(loader.Module):
@@ -11,138 +12,81 @@ class InsMusic(loader.Module):
     strings = {'name': 'InsMusic'}
 
     def __init__(self):
-        self._database = None
+        self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
         self.update_task = None
-        self.current_hash = None
         super().__init__()
 
     async def client_ready(self, client, database):
         self.client = client
-        self._database = database
+        self.database = database
         
-        if not self._database.get("InsMusic", "allowed_chats"):
-            self._database.set("InsMusic", "allowed_chats", [])
+        if not self.database.get("InsMusic", "allowed_chats"):
+            self.database.set("InsMusic", "allowed_chats", [])
         
-        if not self._database.get("InsMusic", "music_bots"):
+        if not self.database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
-            self._database.set("InsMusic", "music_bots", default_bots)
+            self.database.set("InsMusic", "music_bots", default_bots)
         
-        # Запускаем автообновление
+        # Запускаем задачу автообновления
         self.update_task = asyncio.create_task(self.auto_update())
 
-    def get_file_hash(self, content):
-        """Получить хеш содержимого файла"""
-        return hashlib.md5(content.encode('utf-8')).hexdigest()
-
-    async def check_for_updates(self):
-        """Проверить обновления на GitHub"""
-        try:
-            # URL к сырому файлу на GitHub
-            github_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/InsMusic.py"
-            response = requests.get(github_url, timeout=10)
-            
-            if response.status_code == 200:
-                new_content = response.text
-                new_hash = self.get_file_hash(new_content)
-                
-                # Если это первая проверка, просто сохраняем хеш
-                if not self.current_hash:
-                    self.current_hash = new_hash
-                    return False
-                
-                # Если хеш изменился, значит есть обновление
-                if new_hash != self.current_hash:
-                    self.current_hash = new_hash
-                    return True
-                    
-        except Exception:
-            pass  # Тихий сбой, пользователю не нужно знать
-        
-        return False
-
-    async def apply_update(self):
-        """Применить обновление"""
-        try:
-            github_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/InsMusic.py"
-            response = requests.get(github_url, timeout=10)
-            
-            if response.status_code == 200:
-                # Получаем путь к текущему файлу модуля
-                import os
-                import sys
-                
-                # Определяем путь к файлу модуля
-                module_path = __file__
-                
-                # Записываем обновленный код
-                with open(module_path, 'w', encoding='utf-8') as f:
-                    f.write(response.text)
-                
-                # Перезагружаем модуль
-                await self.allmodules.commands["insmusic"](None)
-                
-                return True
-                
-        except Exception:
-            pass  # Тихий сбой
-        
-        return False
-
     async def auto_update(self):
-        """Фоновая задача автообновления"""
-        await asyncio.sleep(60)  # Ждем 1 минуту после загрузки
-        
+        """Фоновая задача автообновления каждые 10 минут"""
         while True:
             try:
-                # Проверяем обновления каждые 10 минут
                 await asyncio.sleep(600)  # 10 минут
-                
-                has_update = await self.check_for_updates()
-                if has_update:
-                    # Применяем обновление без уведомлений
-                    await self.apply_update()
-                    
-            except asyncio.CancelledError:
-                break  # Задача была отменена
+                await self.silent_update()
             except Exception:
-                pass  # Игнорируем все ошибки, чтобы задача продолжала работать
+                # Игнорируем ошибки в автообновлении
+                continue
 
-    async def on_unload(self):
-        """Очистка при выгрузке модуля"""
-        if self.update_task:
-            self.update_task.cancel()
-            try:
-                await self.update_task
-            except asyncio.CancelledError:
-                pass
+    async def silent_update(self):
+        """Тихое обновление без уведомлений"""
+        try:
+            repo_path = os.path.dirname(os.path.abspath(__file__))
+            repo = git.Repo(repo_path)
+            
+            # Получаем текущую ветку
+            current_branch = repo.active_branch.name
+            
+            # Получаем последние изменения
+            origin = repo.remotes.origin
+            origin.fetch()
+            
+            # Сравниваем коммиты
+            local_commit = repo.head.commit
+            remote_commit = repo.refs[f'origin/{current_branch}'].commit
+            
+            if local_commit.hexsha != remote_commit.hexsha:
+                # Сбрасываем изменения и переключаемся на актуальную версию
+                repo.git.reset('--hard', f'origin/{current_branch}')
+                
+                # Перезагружаем модуль
+                await self.allmodules.commands["loadmod"](await self.client.send_message(
+                    "me", f".loadmod {self.__class__.__name__.lower()}"
+                ))
+                
+        except Exception:
+            # Молча игнорируем ошибки обновления
+            pass
 
     @property
     def allowed_chats(self):
-        """Получить список разрешенных чатов"""
-        if self._database:
-            return self._database.get("InsMusic", "allowed_chats", [])
-        return []
+        return self.database.get("InsMusic", "allowed_chats", [])
 
     @allowed_chats.setter
     def allowed_chats(self, value):
-        """Установить список разрешенных чатов"""
-        if self._database:
-            self._database.set("InsMusic", "allowed_chats", value)
+        self.database.set("InsMusic", "allowed_chats", value)
 
     @property
     def music_bots(self):
-        """Получить список ботов для поиска музыки"""
-        if self._database:
-            return self._database.get("InsMusic", "music_bots", [])
-        return []
+        return self.database.get("InsMusic", "music_bots", [])
 
     @music_bots.setter
     def music_bots(self, value):
-        """Установить список ботов для поиска музыки"""
-        if self._database:
-            self._database.set("InsMusic", "music_bots", value)
+        self.database.set("InsMusic", "music_bots", value)
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -226,7 +170,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0
+                timeout=10.0  # Уменьшено с 5 до 3 секунд
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
@@ -304,10 +248,6 @@ class InsMusic(loader.Module):
     async def watcher(self, message):
         if not message.text:
             return
-        
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            return
 
         try:
             chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
@@ -317,7 +257,6 @@ class InsMusic(loader.Module):
         if chat_id.startswith('-100'):
             chat_id = chat_id[4:]
         
-        # Используем property, которое проверяет наличие _database
         if chat_id not in self.allowed_chats:
             original_chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
             if original_chat_id not in self.allowed_chats:
@@ -367,11 +306,6 @@ class InsMusic(loader.Module):
     )
     async def addmcmd(self, message):
         """Добавить чат для работы без префикса"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         try:
             chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
         except Exception:
@@ -395,11 +329,6 @@ class InsMusic(loader.Module):
     )
     async def delmcmd(self, message):
         """Удалить чат из разрешенных"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         args = utils.get_args_raw(message)
         
         if args:
@@ -428,11 +357,6 @@ class InsMusic(loader.Module):
     )
     async def listmcmd(self, message):
         """Список разрешенных чатов"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         allowed_chats_list = self.allowed_chats
         if not allowed_chats_list:
             await message.edit("Список разрешенных чатов пуст.")
@@ -456,11 +380,6 @@ class InsMusic(loader.Module):
     )
     async def botsmcmd(self, message):
         """Список ботов для поиска"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
             text += f"{i}. {bot}\n"
@@ -472,11 +391,6 @@ class InsMusic(loader.Module):
     )
     async def addbotmcmd(self, message):
         """Добавить бота для поиска"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
@@ -497,11 +411,6 @@ class InsMusic(loader.Module):
     )
     async def delbotmcmd(self, message):
         """Удалить бота из поиска"""
-        # Проверяем, что база данных инициализирована
-        if not self._database:
-            await message.edit("Модуль еще не готов!")
-            return
-            
         args = utils.get_args_raw(message)
         if not args:
             await message.edit("Укажите username бота!")
