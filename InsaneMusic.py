@@ -424,3 +424,6 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
+
+
+#хехехн
