@@ -123,7 +123,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=3.0  # Уменьшено с 5 до 3 секунд
+                timeout=10.0  # Уменьшено с 5 до 3 секунд
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
