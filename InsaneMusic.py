@@ -3,7 +3,6 @@ import asyncio
 import time
 import requests
 import hashlib
-import os
 
 
 class InsMusic(loader.Module):
@@ -15,9 +14,8 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
-        self.update_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/insmusic.py"
-        self.is_updating = False
         self.update_task = None
+        self.current_hash = None
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -31,100 +29,110 @@ class InsMusic(loader.Module):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
         
-        # Запуск периодической проверки обновлений каждые 10 минут
-        self.update_task = asyncio.create_task(self._periodic_update_checker())
+        # Запускаем автообновление
+        self.update_task = asyncio.create_task(self.auto_update())
 
-    async def _periodic_update_checker(self):
-        """Периодическая проверка обновлений строго каждые 10 минут"""
-        # Ждем 1 минуту после запуска, чтобы не нагружать систему сразу
-        await asyncio.sleep(60)
-        
-        while True:
-            try:
-                await self._check_and_update_silent()
-            except Exception:
-                # Подавляем все ошибки, пользователь не должен ничего знать
-                pass
-            
-            # Ждем ровно 10 минут (600 секунд) до следующей проверки
-            await asyncio.sleep(600)
+    def get_file_hash(self, content):
+        """Получить хеш содержимого файла"""
+        return hashlib.md5(content.encode('utf-8')).hexdigest()
 
-    async def _check_and_update_silent(self):
-        """Тихая проверка и обновление"""
-        if self.is_updating:
-            return False
-        
-        self.is_updating = True
-        
+    async def check_for_updates(self):
+        """Проверить обновления на GitHub"""
         try:
-            # Получаем текущий хэш модуля
-            module_path = __file__
-            with open(module_path, 'rb') as f:
-                current_hash = hashlib.md5(f.read()).hexdigest()
+            # URL к сырому файлу на GitHub
+            github_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/InsMusic.py"
+            response = requests.get(github_url, timeout=10)
             
-            # Получаем хэш с GitHub
-            response = requests.get(self.update_url, timeout=15)
             if response.status_code == 200:
-                remote_content = response.text
-                remote_hash = hashlib.md5(remote_content.encode()).hexdigest()
+                new_content = response.text
+                new_hash = self.get_file_hash(new_content)
                 
-                if current_hash != remote_hash:
-                    # Молча обновляем модуль
-                    return await self._update_module_silent(remote_content)
+                # Если это первая проверка, просто сохраняем хеш
+                if not self.current_hash:
+                    self.current_hash = new_hash
+                    return False
+                
+                # Если хеш изменился, значит есть обновление
+                if new_hash != self.current_hash:
+                    self.current_hash = new_hash
+                    return True
                     
         except Exception:
-            pass
-        finally:
-            self.is_updating = False
+            pass  # Тихий сбой, пользователю не нужно знать
         
         return False
 
-    async def _update_module_silent(self, new_content):
-        """Скрытое обновление модуля"""
+    async def apply_update(self):
+        """Применить обновление"""
         try:
-            module_path = __file__
+            github_url = "https://raw.githubusercontent.com/InsModule/InsMusic/main/InsMusic.py"
+            response = requests.get(github_url, timeout=10)
             
-            # Создаем резервную копию
-            backup_path = module_path + '.backup'
-            with open(module_path, 'rb') as src, open(backup_path, 'wb') as dst:
-                dst.write(src.read())
-            
-            # Записываем новую версию
-            with open(module_path, 'w', encoding='utf-8') as f:
-                f.write(new_content)
-            
-            # Сохраняем время обновления в базе данных
-            self.database.set("InsMusic", "last_silent_update", time.time())
-            
-            # Планируем перезагрузку модуля через случайное время (5-15 минут)
-            delay = 300 + (hash(self.__class__.__name__ + str(time.time())) % 600)
-            asyncio.create_task(self._delayed_reload(delay))
-            
-            return True
-            
+            if response.status_code == 200:
+                # Получаем путь к текущему файлу модуля
+                import os
+                import sys
+                
+                # Определяем путь к файлу модуля
+                module_path = __file__
+                
+                # Записываем обновленный код
+                with open(module_path, 'w', encoding='utf-8') as f:
+                    f.write(response.text)
+                
+                # Перезагружаем модуль
+                await self.allmodules.commands["insmusic"](None)
+                
+                return True
+                
         except Exception:
-            # Молча восстанавливаем из резервной копии при ошибке
-            try:
-                if os.path.exists(backup_path):
-                    with open(backup_path, 'rb') as src, open(module_path, 'wb') as dst:
-                        dst.write(src.read())
-                    os.remove(backup_path)
-            except:
-                pass
-            return False
-
-    async def _delayed_reload(self, delay):
-        """Отложенная перезагрузка модуля"""
-        await asyncio.sleep(delay)
+            pass  # Тихий сбой
         
-        try:
-            # Перезагружаем модуль в фоне
-            if hasattr(self.allmodules, 'modules'):
-                mod_name = self.__class__.__name__
-                if mod_name in self.allmodules.modules:
-                    await self.allmodules.reload_module(self.__class__.__name__.lower())
-        except:
-            pass
+        return False
+
+    async def auto_update(self):
+        """Фоновая задача автообновления"""
+        await asyncio.sleep(60)  # Ждем 1 минуту после загрузки
+        
+        while True:
+            try:
+                # Проверяем обновления каждые 10 минут
+                await asyncio.sleep(600)  # 10 минут
+                
+                has_update = await self.check_for_updates()
+                if has_update:
+                    # Применяем обновление без уведомлений
+                    await self.apply_update()
+                    
+            except asyncio.CancelledError:
+                break  # Задача была отменена
+            except Exception:
+                pass  # Игнорируем все ошибки, чтобы задача продолжала работать
+
+    async def on_unload(self):
+        """Очистка при выгрузке модуля"""
+        if self.update_task:
+            self.update_task.cancel()
+            try:
+                await self.update_task
+            except asyncio.CancelledError:
+                pass
+
+    @property
+    def allowed_chats(self):
+        return self.database.get("InsMusic", "allowed_chats", [])
+
+    @allowed_chats.setter
+    def allowed_chats(self, value):
+        self.database.set("InsMusic", "allowed_chats", value)
+
+    @property
+    def music_bots(self):
+        return self.database.get("InsMusic", "music_bots", [])
+
+    @music_bots.setter
+    def music_bots(self, value):
+        self.database.set("InsMusic", "music_bots", value)
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -208,7 +216,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0
+                timeout=10.0  # Уменьшено с 5 до 3 секунд
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
@@ -275,7 +283,7 @@ class InsMusic(loader.Module):
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=message.id
+                reply_to=message.id  # Всегда отправляем реплаем на команду
             )
 
         except Exception as error:
@@ -326,7 +334,7 @@ class InsMusic(loader.Module):
                 await message.client.send_file(
                     message.to_id,
                     music_document,
-                    reply_to=message.id
+                    reply_to=message.id  # Реплаем на команду "найти"
                 )
 
             except Exception as error:
@@ -462,8 +470,3 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
-
-    async def on_unload(self):
-        """Очистка при выгрузке модуля"""
-        if self.update_task:
-            self.update_task.cancel()
