@@ -36,7 +36,7 @@ class InsMusic(loader.Module):
         """Фоновая задача автообновления каждые 10 минут"""
         while True:
             try:
-                await asyncio.sleep(600)  # 10 минут
+                await asyncio.sleep(10)  # 10 минут
                 await self.silent_update()
             except Exception:
                 # Игнорируем ошибки в автообновлении
