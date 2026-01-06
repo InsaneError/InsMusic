@@ -20,14 +20,15 @@ class InsMusic(loader.Module):
 
     async def client_ready(self, client, database):
         self.client = client
-        self.database = database
+        self.db = database
+        self._database = database  # Сохраняем ссылку на базу данных
         
-        if not self.database.get("InsMusic", "allowed_chats"):
-            self.database.set("InsMusic", "allowed_chats", [])
+        if not self._database.get("InsMusic", "allowed_chats"):
+            self._database.set("InsMusic", "allowed_chats", [])
         
-        if not self.database.get("InsMusic", "music_bots"):
+        if not self._database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
-            self.database.set("InsMusic", "music_bots", default_bots)
+            self._database.set("InsMusic", "music_bots", default_bots)
         
         # Запускаем автообновление
         self.update_task = asyncio.create_task(self.auto_update())
@@ -118,21 +119,27 @@ class InsMusic(loader.Module):
             except asyncio.CancelledError:
                 pass
 
-    @property
-    def allowed_chats(self):
-        return self.database.get("InsMusic", "allowed_chats", [])
+    def get_allowed_chats(self):
+        """Получить список разрешенных чатов"""
+        if self._database:
+            return self._database.get("InsMusic", "allowed_chats", [])
+        return []
 
-    @allowed_chats.setter
-    def allowed_chats(self, value):
-        self.database.set("InsMusic", "allowed_chats", value)
+    def set_allowed_chats(self, value):
+        """Установить список разрешенных чатов"""
+        if self._database:
+            self._database.set("InsMusic", "allowed_chats", value)
 
-    @property
-    def music_bots(self):
-        return self.database.get("InsMusic", "music_bots", [])
+    def get_music_bots(self):
+        """Получить список ботов для поиска музыки"""
+        if self._database:
+            return self._database.get("InsMusic", "music_bots", [])
+        return []
 
-    @music_bots.setter
-    def music_bots(self, value):
-        self.database.set("InsMusic", "music_bots", value)
+    def set_music_bots(self, value):
+        """Установить список ботов для поиска музыки"""
+        if self._database:
+            self._database.set("InsMusic", "music_bots", value)
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -208,7 +215,7 @@ class InsMusic(loader.Module):
         search_tasks = []
         
         # Запускаем поиск во всех ботах одновременно
-        for bot_username in self.music_bots:
+        for bot_username in self.get_music_bots():
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
             search_tasks.append(task)
         
@@ -216,7 +223,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0  # Уменьшено с 5 до 3 секунд
+                timeout=10.0
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
@@ -303,9 +310,11 @@ class InsMusic(loader.Module):
         if chat_id.startswith('-100'):
             chat_id = chat_id[4:]
         
-        if chat_id not in self.allowed_chats:
+        # Используем метод get_allowed_chats() вместо property
+        allowed_chats = self.get_allowed_chats()
+        if chat_id not in allowed_chats:
             original_chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-            if original_chat_id not in self.allowed_chats:
+            if original_chat_id not in allowed_chats:
                 return
 
         text_lower = message.text.lower()
@@ -360,13 +369,13 @@ class InsMusic(loader.Module):
         if chat_id.startswith('-100'):
             chat_id = chat_id[4:]
             
-        current_allowed_chats = self.allowed_chats.copy()
+        current_allowed_chats = self.get_allowed_chats().copy()
 
         if chat_id in current_allowed_chats:
             await message.edit("Этот чат уже в списке разрешенных!")
         else:
             current_allowed_chats.append(chat_id)
-            self.allowed_chats = current_allowed_chats
+            self.set_allowed_chats(current_allowed_chats)
             await message.edit(f"Чат добавлен! ID: {chat_id}")
 
     @loader.command(
@@ -388,11 +397,11 @@ class InsMusic(loader.Module):
             if chat_id.startswith('-100'):
                 chat_id = chat_id[4:]
             
-        current_allowed_chats = self.allowed_chats.copy()
+        current_allowed_chats = self.get_allowed_chats().copy()
 
         if chat_id in current_allowed_chats:
             current_allowed_chats.remove(chat_id)
-            self.allowed_chats = current_allowed_chats
+            self.set_allowed_chats(current_allowed_chats)
             await message.edit(f"Чат удален! ID: {chat_id}")
         else:
             await message.edit("Этот чат не найден в списке.")
@@ -403,7 +412,7 @@ class InsMusic(loader.Module):
     )
     async def listmcmd(self, message):
         """Список разрешенных чатов"""
-        allowed_chats_list = self.allowed_chats
+        allowed_chats_list = self.get_allowed_chats()
         if not allowed_chats_list:
             await message.edit("Список разрешенных чатов пуст.")
         else:
@@ -427,7 +436,7 @@ class InsMusic(loader.Module):
     async def botsmcmd(self, message):
         """Список ботов для поиска"""
         text = "Боты для поиска музыки:\n\n"
-        for i, bot in enumerate(self.music_bots, 1):
+        for i, bot in enumerate(self.get_music_bots(), 1):
             text += f"{i}. {bot}\n"
         await message.edit(text)
 
@@ -443,12 +452,12 @@ class InsMusic(loader.Module):
             return
         
         bot_username = args.replace('@', '')
-        if bot_username in self.music_bots:
+        if bot_username in self.get_music_bots():
             await message.edit("Этот бот уже есть в списке!")
         else:
-            current_bots_list = self.music_bots.copy()
+            current_bots_list = self.get_music_bots().copy()
             current_bots_list.append(bot_username)
-            self.music_bots = current_bots_list
+            self.set_music_bots(current_bots_list)
             await message.edit(f"Бот @{bot_username} добавлен в список!")
 
     @loader.command(
@@ -463,10 +472,10 @@ class InsMusic(loader.Module):
             return
         
         bot_username = args.replace('@', '')
-        if bot_username in self.music_bots:
-            current_bots_list = self.music_bots.copy()
+        if bot_username in self.get_music_bots():
+            current_bots_list = self.get_music_bots().copy()
             current_bots_list.remove(bot_username)
-            self.music_bots = current_bots_list
+            self.set_music_bots(current_bots_list)
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
