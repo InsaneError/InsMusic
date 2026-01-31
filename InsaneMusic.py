@@ -56,7 +56,7 @@ class InsMusic(loader.Module):
             # Используем более быстрый метод получения inline результатов
             results = await asyncio.wait_for(
                 message.client.inline_query(bot_username, query),
-                timeout=4.0
+                timeout=1.0
             )
             if results and len(results) > 0 and hasattr(results[0].result, 'document'):
                 return {
@@ -123,7 +123,7 @@ class InsMusic(loader.Module):
         try:
             all_results = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0  # Уменьшено с 5 до 3 секунд
+                timeout=2.0  # Уменьшено с 5 до 3 секунд
             )
         except asyncio.TimeoutError:
             # Получаем результаты от тех ботов, которые успели ответить
