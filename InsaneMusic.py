@@ -1,6 +1,7 @@
 from .. import loader, utils
 import asyncio
 import time
+from typing import Optional, Dict, List
 
 
 class InsMusic(loader.Module):
@@ -12,6 +13,7 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
+        self.cache = {}  # Кэш для результатов поиска
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -51,66 +53,132 @@ class InsMusic(loader.Module):
         self.spam_protection[user_id] = current_time
         return True
 
-    async def search_in_bot(self, bot_username, query, message):
+    async def search_in_bot(self, bot_username: str, query: str, message) -> Optional[Dict]:
+        """Поиск музыки в конкретном боте с улучшенной логикой"""
         try:
-            # Используем более быстрый метод получения inline результатов
+            # Ключ для кэша
+            cache_key = f"{bot_username}:{query.lower()}"
+            
+            # Проверяем кэш
+            if cache_key in self.cache:
+                cached_result = self.cache[cache_key]
+                # Проверяем актуальность кэша (5 минут)
+                if time.time() - cached_result.get('timestamp', 0) < 300:
+                    return cached_result.get('result')
+            
+            # Получаем инлайн результаты
             results = await asyncio.wait_for(
                 message.client.inline_query(bot_username, query),
-                timeout=2
+                timeout=5  # Увеличено для медленных ботов
             )
-            if results and len(results) > 0 and hasattr(results[0].result, 'document'):
-                return {
-                    'bot': bot_username,
-                    'document': results[0].result.document,
-                    'title': results[0].result.document.attributes[0].title if hasattr(results[0].result.document.attributes[0], 'title') else '',
-                    'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else ''
+            
+            if not results:
+                return None
+            
+            # Ищем лучший результат среди всех предложенных
+            best_result = None
+            best_score = 0
+            
+            for result in results[:10]:  # Проверяем первые 10 результатов
+                if not hasattr(result, 'result') or not hasattr(result.result, 'document'):
+                    continue
+                
+                document = result.result.document
+                
+                # Пропускаем не аудио файлы
+                if not document.mime_type.startswith('audio/'):
+                    continue
+                
+                # Извлекаем метаданные
+                title = ""
+                performer = ""
+                duration = 0
+                
+                if hasattr(document, 'attributes') and document.attributes:
+                    for attr in document.attributes:
+                        if hasattr(attr, 'title'):
+                            title = getattr(attr, 'title', '').lower()
+                        if hasattr(attr, 'performer'):
+                            performer = getattr(attr, 'performer', '').lower()
+                        if hasattr(attr, 'duration'):
+                            duration = getattr(attr, 'duration', 0)
+                
+                # Пропускаем слишком короткие или слишком длинные треки
+                if duration < 30 or duration > 600:  # от 30 секунд до 10 минут
+                    continue
+                
+                # Считаем релевантность
+                score = self.calculate_relevance(query.lower(), title, performer)
+                
+                if score > best_score:
+                    best_score = score
+                    best_result = {
+                        'bot': bot_username,
+                        'document': document,
+                        'title': title.capitalize() if title else '',
+                        'performer': performer.capitalize() if performer else '',
+                        'duration': duration,
+                        'score': score
+                    }
+            
+            if best_result:
+                # Сохраняем в кэш
+                self.cache[cache_key] = {
+                    'result': best_result,
+                    'timestamp': time.time()
                 }
-        except (asyncio.TimeoutError, Exception):
+                return best_result
+            
+        except asyncio.TimeoutError:
             return None
+        except Exception as e:
+            # Логируем ошибку, но не прерываем выполнение
+            print(f"Error in bot {bot_username}: {e}")
+            return None
+        
         return None
 
-    def find_best_match(self, search_results, query):
-        """Выбирает самый подходящий результат из всех полученных"""
-        if not search_results:
-            return None
+    def calculate_relevance(self, query: str, title: str, performer: str) -> int:
+        """Вычисляет релевантность результата запросу"""
+        score = 0
         
-        query_lower = query.lower()
-        best_result = None
-        best_score = -1
+        # Разбиваем запрос на слова
+        query_words = set(query.split())
         
-        for result in search_results:
-            if not result:
-                continue
-                
-            score = 0
+        if title:
+            title_words = set(title.split())
+            # Количество совпадающих слов
+            common_words = query_words.intersection(title_words)
+            score += len(common_words) * 3
             
-            # Проверяем совпадение исполнителя
-            if result['performer']:
-                performer_lower = result['performer'].lower()
-                if any(term in performer_lower for term in query_lower.split()):
-                    score += 2
-                if performer_lower in query_lower or any(word in query_lower for word in performer_lower.split()):
-                    score += 3
-            
-            # Проверяем совпадение названия
-            if result['title']:
-                title_lower = result['title'].lower()
-                if any(term in title_lower for term in query_lower.split()):
-                    score += 1
-                if title_lower in query_lower or any(word in query_lower for word in title_lower.split()):
-                    score += 2
-            
-            # Если есть и исполнитель и название, увеличиваем шансы
-            if result['performer'] and result['title']:
-                score += 1
-            
-            if score > best_score:
-                best_score = score
-                best_result = result
+            # Полное совпадение названия
+            if query in title:
+                score += 10
+            # Частичное совпадение
+            elif any(word in title for word in query_words):
+                score += 5
         
-        return best_result['document'] if best_result else None
+        if performer:
+            performer_words = set(performer.split())
+            # Совпадение исполнителя
+            common_words = query_words.intersection(performer_words)
+            score += len(common_words) * 4
+            
+            # Запрос содержит исполнителя
+            if any(word in performer for word in query_words):
+                score += 7
+        
+        # Бонус за наличие и названия и исполнителя
+        if title and performer:
+            score += 3
+        
+        # Штраф за пустые поля
+        if not title and not performer:
+            score -= 10
+        
+        return score
 
-    async def search_music_all_bots(self, query, message):
+    async def search_music_all_bots(self, query: str, message):
         """Ждет результаты от всех ботов и выбирает лучший"""
         search_tasks = []
         
@@ -119,33 +187,44 @@ class InsMusic(loader.Module):
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
             search_tasks.append(task)
         
-        # Ждем завершения всех задач с таймаутом
-        try:
-            all_results = await asyncio.wait_for(
-                asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0  # Уменьшено с 5 до 3 секунд
+        # Ждем первые успешные результаты
+        timeout = 8.0  # Увеличено для стабильности
+        start_time = time.time()
+        
+        all_results = []
+        pending_tasks = set(search_tasks)
+        
+        while pending_tasks and time.time() - start_time < timeout:
+            # Ждем завершения хотя бы одной задачи
+            done, pending_tasks = await asyncio.wait(
+                pending_tasks,
+                timeout=timeout - (time.time() - start_time),
+                return_when=asyncio.FIRST_COMPLETED
             )
-        except asyncio.TimeoutError:
-            # Получаем результаты от тех ботов, которые успели ответить
-            completed_results = []
-            for task in search_tasks:
-                if task.done():
-                    try:
-                        result = task.result()
-                        if result and not isinstance(result, Exception):
-                            completed_results.append(result)
-                    except:
-                        pass
-            all_results = completed_results
+            
+            for task in done:
+                try:
+                    result = task.result()
+                    if result:
+                        all_results.append(result)
+                        # Если нашли очень релевантный результат, возвращаем сразу
+                        if result.get('score', 0) >= 15:
+                            # Отменяем оставшиеся задачи
+                            for t in pending_tasks:
+                                t.cancel()
+                            return result.get('document')
+                except Exception:
+                    continue
         
-        # Фильтруем исключения
-        valid_results = []
-        for result in all_results:
-            if result and not isinstance(result, Exception):
-                valid_results.append(result)
+        # Выбираем лучший результат среди найденных
+        if not all_results:
+            return None
         
-        # Выбираем лучший результат
-        return self.find_best_match(valid_results, query)
+        # Сортируем по релевантности
+        all_results.sort(key=lambda x: x.get('score', 0), reverse=True)
+        
+        # Возвращаем документ лучшего результата
+        return all_results[0].get('document')
 
     async def search_music(self, query, message):
         async with self.search_lock:
@@ -166,7 +245,6 @@ class InsMusic(loader.Module):
             return
         
         search_query = utils.get_args_raw(message)
-        reply_message = await message.get_reply_message()
 
         if not search_query:
             await message.delete()
@@ -176,12 +254,12 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+            searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji> Поиск: {search_query[:50]}...")
 
             music_document = await self.search_music(search_query, message)
 
             if not music_document:
-                await searching_message.edit("Музыка не найдена")
+                await searching_message.edit("❌ Музыка не найдена")
                 await self.delete_after(searching_message, 3)
                 return
 
@@ -190,7 +268,8 @@ class InsMusic(loader.Module):
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=message.id  # Всегда отправляем реплаем на команду
+                reply_to=message.id,
+                caption=f"🎵 Найдено по запросу: {search_query}"
             )
 
         except Exception as error:
@@ -223,16 +302,19 @@ class InsMusic(loader.Module):
                 await message.delete()
                 return
             
-            search_query = message.text[6:]
+            search_query = message.text[6:].strip()
+            
+            if not search_query or len(search_query) < 2:
+                return
 
             try:
                 await message.delete()
-                searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+                searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji> Поиск: {search_query[:50]}...")
 
                 music_document = await self.search_music(search_query, message)
 
                 if not music_document:
-                    await searching_message.edit("Музыка не найдена")
+                    await searching_message.edit("❌ Музыка не найдена")
                     await self.delete_after(searching_message, 3)
                     return
 
@@ -241,7 +323,8 @@ class InsMusic(loader.Module):
                 await message.client.send_file(
                     message.to_id,
                     music_document,
-                    reply_to=message.id  # Реплаем на команду "найти"
+                    reply_to=message.id,
+                    caption=f"🎵 Найдено по запросу: {search_query}"
                 )
 
             except Exception as error:
@@ -335,7 +418,7 @@ class InsMusic(loader.Module):
         """Список ботов для поиска"""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
-            text += f"{i}. {bot}\n"
+            text += f"{i}. @{bot}\n"
         await message.edit(text)
 
     @loader.command(
@@ -378,3 +461,11 @@ class InsMusic(loader.Module):
         else:
             await message.edit("Этот бот не найден в списке!")
 
+    @loader.command(
+        ru_doc="Очищает кэш поиска",
+        en_doc="Clears search cache"
+    )
+    async def clearmcache(self, message):
+        """Очистить кэш поиска"""
+        self.cache.clear()
+        await message.edit("✅ Кэш поиска очищен!")
