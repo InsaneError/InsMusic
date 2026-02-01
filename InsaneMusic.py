@@ -51,22 +51,102 @@ class InsMusic(loader.Module):
         self.spam_protection[user_id] = current_time
         return True
 
+    def generate_search_variants(self, query):
+        """Генерирует варианты поискового запроса для лучшего нахождения"""
+        words = query.split()
+        variants = []
+        
+        # Оригинальный запрос
+        variants.append(query)
+        
+        # Удаляем лишние слова вроде "скачать", "музыка", "песня"
+        stop_words = ['скачать', 'музыка', 'песня', 'слушать', 'mp3', 'music', 'download']
+        filtered_words = [w for w in words if w.lower() not in stop_words]
+        if filtered_words and len(filtered_words) != len(words):
+            variants.append(' '.join(filtered_words))
+        
+        # Разные комбинации для артиста и названия
+        if len(words) >= 2:
+            # Меняем местами слова (артист - название)
+            variants.append(f"{words[1]} {words[0]}")
+            
+            # Добавляем только первое слово (часто это артист)
+            variants.append(words[0])
+            
+            # Добавляем только последнее слово (часто это название)
+            variants.append(words[-1])
+            
+            # Комбинация всех слов кроме первого
+            if len(words) > 2:
+                variants.append(' '.join(words[1:]))
+        
+        # Убираем дубликаты
+        unique_variants = []
+        seen = set()
+        for variant in variants:
+            if variant and variant not in seen:
+                seen.add(variant)
+                unique_variants.append(variant)
+        
+        return unique_variants[:6]  # Ограничиваем количество вариантов
+
     async def search_in_bot(self, bot_username, query, message):
-        try:
-            # Используем более быстрый метод получения inline результатов
-            results = await asyncio.wait_for(
-                message.client.inline_query(bot_username, query),
-                timeout=2
-            )
-            if results and len(results) > 0 and hasattr(results[0].result, 'document'):
-                return {
-                    'bot': bot_username,
-                    'document': results[0].result.document,
-                    'title': results[0].result.document.attributes[0].title if hasattr(results[0].result.document.attributes[0], 'title') else '',
-                    'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else ''
-                }
-        except (asyncio.TimeoutError, Exception):
-            return None
+        """Ищет музыку в конкретном боте с разными вариантами запроса"""
+        variants = self.generate_search_variants(query)
+        
+        for search_variant in variants:
+            try:
+                # Пытаемся получить результаты с более агрессивным таймаутом
+                results = await asyncio.wait_for(
+                    message.client.inline_query(bot_username, search_variant),
+                    timeout=1.5  # Уменьшенный таймаут для быстрого переключения
+                )
+                
+                if results and len(results) > 0:
+                    for result in results[:3]:  # Проверяем первые 3 результата
+                        if hasattr(result.result, 'document'):
+                            # Проверяем качество совпадения
+                            title_match = False
+                            performer_match = False
+                            
+                            if hasattr(result.result.document.attributes[0], 'title'):
+                                doc_title = result.result.document.attributes[0].title.lower()
+                                # Проверяем ключевые слова в названии
+                                for word in query.lower().split():
+                                    if len(word) > 3 and word in doc_title:
+                                        title_match = True
+                                        break
+                            
+                            if hasattr(result.result.document.attributes[0], 'performer'):
+                                doc_performer = result.result.document.attributes[0].performer.lower()
+                                # Проверяем ключевые слова в имени исполнителя
+                                for word in query.lower().split():
+                                    if len(word) > 3 and word in doc_performer:
+                                        performer_match = True
+                                        break
+                            
+                            # Если есть совпадение либо в названии, либо в исполнителе
+                            if title_match or performer_match:
+                                return {
+                                    'bot': bot_username,
+                                    'document': result.result.document,
+                                    'title': result.result.document.attributes[0].title if hasattr(result.result.document.attributes[0], 'title') else '',
+                                    'performer': result.result.document.attributes[0].performer if hasattr(result.result.document.attributes[0], 'performer') else '',
+                                    'score': (2 if title_match else 0) + (2 if performer_match else 0)
+                                }
+                    
+                    # Если не нашли точного совпадения, берем первый результат
+                    return {
+                        'bot': bot_username,
+                        'document': results[0].result.document,
+                        'title': results[0].result.document.attributes[0].title if hasattr(results[0].result.document.attributes[0], 'title') else '',
+                        'performer': results[0].result.document.attributes[0].performer if hasattr(results[0].result.document.attributes[0], 'performer') else '',
+                        'score': 1
+                    }
+                    
+            except (asyncio.TimeoutError, Exception):
+                continue  # Пробуем следующий вариант или следующего бота
+        
         return None
 
     def find_best_match(self, search_results, query):
@@ -82,27 +162,30 @@ class InsMusic(loader.Module):
             if not result:
                 continue
                 
-            score = 0
+            # Используем предварительно вычисленный score
+            score = result.get('score', 0)
             
-            # Проверяем совпадение исполнителя
-            if result['performer']:
-                performer_lower = result['performer'].lower()
-                if any(term in performer_lower for term in query_lower.split()):
-                    score += 2
-                if performer_lower in query_lower or any(word in query_lower for word in performer_lower.split()):
-                    score += 3
-            
-            # Проверяем совпадение названия
+            # Дополнительные проверки для улучшения точности
             if result['title']:
                 title_lower = result['title'].lower()
-                if any(term in title_lower for term in query_lower.split()):
-                    score += 1
-                if title_lower in query_lower or any(word in query_lower for word in title_lower.split()):
-                    score += 2
+                # Проверяем полное совпадение слов
+                query_words = set(query_lower.split())
+                title_words = set(title_lower.split())
+                common_words = query_words.intersection(title_words)
+                if common_words:
+                    score += len(common_words) * 2
             
-            # Если есть и исполнитель и название, увеличиваем шансы
+            if result['performer']:
+                performer_lower = result['performer'].lower()
+                query_words = set(query_lower.split())
+                performer_words = set(performer_lower.split())
+                common_words = query_words.intersection(performer_words)
+                if common_words:
+                    score += len(common_words) * 3
+            
+            # Бонус за наличие обоих полей
             if result['performer'] and result['title']:
-                score += 1
+                score += 2
             
             if score > best_score:
                 best_score = score
@@ -111,46 +194,59 @@ class InsMusic(loader.Module):
         return best_result['document'] if best_result else None
 
     async def search_music_all_bots(self, query, message):
-        """Ждет результаты от всех ботов и выбирает лучший"""
+        """Ждет результаты от всех ботов одновременно и выбирает лучший"""
         search_tasks = []
         
-        # Запускаем поиск во всех ботах одновременно
+        # Запускаем поиск во всех ботах параллельно
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, query, message))
             search_tasks.append(task)
         
-        # Ждем завершения всех задач с таймаутом
-        try:
-            all_results = await asyncio.wait_for(
-                asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0  # Уменьшено с 5 до 3 секунд
-            )
-        except asyncio.TimeoutError:
-            # Получаем результаты от тех ботов, которые успели ответить
-            completed_results = []
-            for task in search_tasks:
-                if task.done():
+        # Используем as_completed для получения первого успешного результата
+        completed_results = []
+        done, pending = await asyncio.wait(search_tasks, timeout=3.0, return_when=asyncio.FIRST_COMPLETED)
+        
+        # Собираем завершенные задачи
+        for task in done:
+            try:
+                result = task.result()
+                if result:
+                    completed_results.append(result)
+                    # Если нашли хороший результат (score >= 3), можем остановиться
+                    if result.get('score', 0) >= 3:
+                        # Отменяем оставшиеся задачи
+                        for p in pending:
+                            p.cancel()
+                        return self.find_best_match([result], query)
+            except Exception:
+                pass
+        
+        # Если есть еще время, ждем другие результаты
+        if pending and completed_results:
+            try:
+                additional_done, _ = await asyncio.wait(pending, timeout=1.0)
+                for task in additional_done:
                     try:
                         result = task.result()
-                        if result and not isinstance(result, Exception):
+                        if result:
                             completed_results.append(result)
-                    except:
+                    except Exception:
                         pass
-            all_results = completed_results
+            except asyncio.TimeoutError:
+                pass
         
-        # Фильтруем исключения
-        valid_results = []
-        for result in all_results:
-            if result and not isinstance(result, Exception):
-                valid_results.append(result)
+        # Отменяем все оставшиеся задачи
+        for task in pending:
+            task.cancel()
         
-        # Выбираем лучший результат
-        return self.find_best_match(valid_results, query)
+        # Выбираем лучший результат из найденных
+        return self.find_best_match(completed_results, query)
 
     async def search_music(self, query, message):
         async with self.search_lock:
             return await self.search_music_all_bots(query, message)
 
+    # Остальные методы остаются без изменений...
     @loader.command(
         ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
         en_doc="<title> - Search music by title (works with prefix)"
