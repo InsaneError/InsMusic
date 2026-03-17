@@ -353,19 +353,26 @@ class InsMusic(loader.Module):
             # Очищаем запрос
             cleaned_query = self.clean_query(search_query)
             
-            # Показываем инлайн-кнопки с выбором
-            result = await message.client.inline_query(
-                "lybot",  # Используем Lybot для инлайн-выбора
-                cleaned_query
-            )
+            # Показываем инлайн-кнопки с выбором используя Lybot
+            try:
+                # Пытаемся использовать Lybot для инлайн-поиска
+                result = await message.client.inline_query("lybot", cleaned_query)
+            except Exception:
+                try:
+                    # Если Lybot не работает, пробуем ShillMusic_bot
+                    result = await message.client.inline_query("ShillMusic_bot", cleaned_query)
+                except Exception:
+                    # Если и этот не работает, используем MusicDownloaderBot
+                    result = await message.client.inline_query("MusicDownloaderBot", cleaned_query)
             
             if result and len(result) > 0:
-                # Отправляем первые 30 результатов как инлайн-выбор
-                await message.client.send_file(
-                    message.to_id,
-                    result[:30],
-                    reply_to=message.id
-                )
+                # Отправляем результаты как инлайн-сообщение
+                await result[0].click(message.to_id, reply_to=message.id)
+                
+                # Отправляем остальные результаты по одному (до 5 штук)
+                for i in range(1, min(len(result), 5)):
+                    await asyncio.sleep(0.5)
+                    await result[i].click(message.to_id)
             else:
                 error_message = await message.respond("Музыка не найдена")
                 await self.delete_after(error_message, 3)
