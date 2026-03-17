@@ -304,12 +304,12 @@ class InsMusic(loader.Module):
 
         try:
             await message.delete()
-            searching_message = await message.respond(f"🔍 Ищу: {search_query}")
+            searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
 
             music_document = await self.search_music(search_query, message)
 
             if not music_document:
-                await searching_message.edit("❌ Музыка не найдена")
+                await searching_message.edit("Музыка не найдена")
                 await self.delete_after(searching_message, 3)
                 return
 
