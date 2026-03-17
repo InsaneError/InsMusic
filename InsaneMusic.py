@@ -326,6 +326,54 @@ class InsMusic(loader.Module):
             error_message = await message.respond(f"Ошибка: {str(error)}")
             await self.delete_after(error_message, 3)
 
+    @loader.command(
+        ru_doc="<название> - Позволяет выбрать музыку через инлайн-бота",
+        en_doc="<title> - Choose music via inline bot"
+    )
+    async def миcmd(self, message):
+        """Выбор музыки через инлайн"""
+        # Проверка на спам
+        user_id = message.sender_id
+        if not self.check_spam(user_id):
+            await message.delete()
+            error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
+            await self.delete_after(error_message, 3)
+            return
+        
+        search_query = utils.get_args_raw(message)
+        if not search_query:
+            await message.delete()
+            error_message = await message.respond("Укажите название песни!")
+            await self.delete_after(error_message, 3)
+            return
+
+        try:
+            await message.delete()
+            
+            # Очищаем запрос
+            cleaned_query = self.clean_query(search_query)
+            
+            # Показываем инлайн-кнопки с выбором
+            result = await message.client.inline_query(
+                "lybot",  # Используем Lybot для инлайн-выбора
+                cleaned_query
+            )
+            
+            if result and len(result) > 0:
+                # Отправляем первые 30 результатов как инлайн-выбор
+                await message.client.send_file(
+                    message.to_id,
+                    result[:30],
+                    reply_to=message.id
+                )
+            else:
+                error_message = await message.respond("Музыка не найдена")
+                await self.delete_after(error_message, 3)
+                
+        except Exception as error:
+            error_message = await message.respond(f"Ошибка: {str(error)}")
+            await self.delete_after(error_message, 3)
+
     async def watcher(self, message):
         if not message.text:
             return
@@ -463,7 +511,7 @@ class InsMusic(loader.Module):
         """Список ботов для поиска"""
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(self.music_bots, 1):
-            text += f"{i}. {bot}\n"
+            text += f"{i}. @{bot}\n"
         await message.edit(text)
 
     @loader.command(
