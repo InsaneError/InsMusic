@@ -353,26 +353,63 @@ class InsMusic(loader.Module):
             # Очищаем запрос
             cleaned_query = self.clean_query(search_query)
             
-            # Показываем инлайн-кнопки с выбором используя Lybot
-            try:
-                # Пытаемся использовать Lybot для инлайн-поиска
-                result = await message.client.inline_query("lybot", cleaned_query)
-            except Exception:
-                try:
-                    # Если Lybot не работает, пробуем ShillMusic_bot
-                    result = await message.client.inline_query("ShillMusic_bot", cleaned_query)
-                except Exception:
-                    # Если и этот не работает, используем MusicDownloaderBot
-                    result = await message.client.inline_query("MusicDownloaderBot", cleaned_query)
+            # Пробуем разные ботов для инлайн-поиска
+            bots_to_try = ["lybot", "ShillMusic_bot", "MusicDownloaderBot", "vkm4_bot"]
+            inline_results = None
+            used_bot = None
             
-            if result and len(result) > 0:
-                # Отправляем результаты как инлайн-сообщение
-                await result[0].click(message.to_id, reply_to=message.id)
+            for bot in bots_to_try:
+                try:
+                    inline_results = await message.client.inline_query(bot, cleaned_query)
+                    if inline_results and len(inline_results) > 0:
+                        used_bot = bot
+                        break
+                except Exception:
+                    continue
+            
+            if inline_results and len(inline_results) > 0:
+                # Создаем список для хранения ID сообщений
+                sent_messages = []
                 
-                # Отправляем остальные результаты по одному (до 5 штук)
-                for i in range(1, min(len(result), 5)):
-                    await asyncio.sleep(0.5)
-                    await result[i].click(message.to_id)
+                # Отправляем первые 5 результатов по одному
+                for i in range(min(len(inline_results), 5)):
+                    try:
+                        # Для первого результата делаем реплай на команду
+                        if i == 0:
+                            msg = await message.client.send_message(
+                                message.to_id,
+                                f"🎵 Результат от @{used_bot}:\n{inline_results[i].title if hasattr(inline_results[i], 'title') else ''}",
+                                reply_to=message.id
+                            )
+                            # Пытаемся отправить сам файл
+                            if hasattr(inline_results[i].result, 'document'):
+                                await message.client.send_file(
+                                    message.to_id,
+                                    inline_results[i].result.document,
+                                    reply_to=msg.id
+                                )
+                        else:
+                            # Остальные результаты просто отправляем
+                            msg = await message.client.send_message(
+                                message.to_id,
+                                f"🎵 Результат {i+1} от @{used_bot}:\n{inline_results[i].title if hasattr(inline_results[i], 'title') else ''}"
+                            )
+                            if hasattr(inline_results[i].result, 'document'):
+                                await message.client.send_file(
+                                    message.to_id,
+                                    inline_results[i].result.document,
+                                    reply_to=msg.id
+                                )
+                        
+                        sent_messages.append(msg)
+                        await asyncio.sleep(0.5)  # Небольшая задержка между отправками
+                        
+                    except Exception as e:
+                        continue
+                
+                if not sent_messages:
+                    error_message = await message.respond("Не удалось отправить результаты")
+                    await self.delete_after(error_message, 3)
             else:
                 error_message = await message.respond("Музыка не найдена")
                 await self.delete_after(error_message, 3)
