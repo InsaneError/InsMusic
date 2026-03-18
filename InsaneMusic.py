@@ -6,7 +6,7 @@ from telethon.tl.types import Message
 
 
 class InsMusic(loader.Module):
-    """Модуль для поиска музыки от @InsModule."""
+    """Модуль для поиска музыки от @SheoMod."""
 
     strings = {'name': 'InsMusic'}
 
@@ -392,7 +392,7 @@ class InsMusic(loader.Module):
         
         try:
             await self.inline.form(
-                text="🎵 Выберите трек:",
+                text="МИнлайн",
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
