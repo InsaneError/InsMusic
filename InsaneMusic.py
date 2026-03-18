@@ -400,7 +400,7 @@ class InsMusic(loader.Module):
             return [[{"text": "Ничего не найдено", "action": "close"}]]
         
         buttons = []
-        for i, result in enumerate(results[:6], 1):
+        for i, result in enumerate(results[:10], 1):
             
             title = result.get('title', 'Неизвестный трек')
             performer = result.get('performer', '')
