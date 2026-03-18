@@ -266,7 +266,7 @@ class InsMusic(loader.Module):
         try:
             results_lists = await asyncio.wait_for(
                 asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=10.0
+                timeout=20.0
             )
             
             for results_list in results_lists:
