@@ -419,7 +419,7 @@ class InsMusic(loader.Module):
         try:
            
             await self.inline.form(
-                text=f"<emoji document_id=5330324623613533041>⏰</emoji>",
+                text="МИнлайн",
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
