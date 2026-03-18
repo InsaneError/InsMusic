@@ -74,14 +74,12 @@ class InsMusic(loader.Module):
                         title = ""
                         performer = ""
                         
-                 
                         for attr in doc.attributes:
                             if hasattr(attr, 'title'):
                                 title = attr.title
                             if hasattr(attr, 'performer'):
                                 performer = attr.performer
                         
-                       
                         if not title and hasattr(result.result, 'title'):
                             title = result.result.title
                         
@@ -104,7 +102,6 @@ class InsMusic(loader.Module):
 
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
-        
         query = re.sub(r'[^\w\s-]', ' ', query)
         query = re.sub(r'\s+', ' ', query).strip()
         return query
@@ -380,7 +377,7 @@ class InsMusic(loader.Module):
             return
         
         await message.delete()
-        await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+        emoji_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
         
         try:
             await self.inline.form(
@@ -389,7 +386,9 @@ class InsMusic(loader.Module):
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
             )
+            await emoji_message.delete()
         except Exception as e:
+            await emoji_message.delete()
             await utils.answer(message, f"Ошибка: {str(e)}")
 
     async def _build_music_buttons(self, query: str, message: Message):
