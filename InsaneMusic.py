@@ -392,7 +392,7 @@ class InsMusic(loader.Module):
         
         try:
             await self.inline.form(
-                text="🎵 Выберите трек:",
+                text="МИнлайн",
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
