@@ -2,6 +2,7 @@ from .. import loader, utils
 import asyncio
 import time
 import re
+from telethon.tl.types import Message
 
 
 class InsMusic(loader.Module):
@@ -64,8 +65,8 @@ class InsMusic(loader.Module):
                 return []
             
             music_results = []
-            # Собираем до 5 результатов от каждого бота
-            for i in range(min(len(results), 5)):
+            # Собираем до 6 результатов от каждого бота
+            for i in range(min(len(results), 6)):
                 result = results[i]
                 if hasattr(result.result, 'document') and result.result.document:
                     try:
@@ -89,7 +90,9 @@ class InsMusic(loader.Module):
                             'document': doc,
                             'title': title,
                             'performer': performer,
-                            'raw_title': result.result.title if hasattr(result.result, 'title') else ''
+                            'raw_title': result.result.title if hasattr(result.result, 'title') else '',
+                            'result_id': i,  # Добавляем ID результата
+                            'original_result': result  # Сохраняем оригинальный результат
                         })
                     except Exception:
                         continue
@@ -98,7 +101,6 @@ class InsMusic(loader.Module):
             
         except (asyncio.TimeoutError, Exception):
             return []
-        return []
 
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
@@ -246,7 +248,9 @@ class InsMusic(loader.Module):
             # Объединяем с имеющимися данными
             track_info.update({
                 'bot': result.get('bot', ''),
-                'document': result['document']
+                'document': result['document'],
+                'result_id': result.get('result_id', 0),
+                'original_result': result.get('original_result')
             })
             
             # Рассчитываем релевантность
@@ -278,6 +282,80 @@ class InsMusic(loader.Module):
     async def search_music(self, query, message):
         async with self.search_lock:
             return await self.search_music_all_bots(query, message)
+
+    async def search_music_inline(self, query, message, offset=0):
+        """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
+        cleaned_query = self.clean_query(query)
+        search_tasks = []
+        
+        # Запускаем поиск во всех ботах
+        for bot_username in self.music_bots:
+            task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
+            search_tasks.append(task)
+        
+        # Собираем все результаты
+        all_results = []
+        try:
+            results_lists = await asyncio.wait_for(
+                asyncio.gather(*search_tasks, return_exceptions=True),
+                timeout=10.0
+            )
+            
+            for results_list in results_lists:
+                if isinstance(results_list, list):
+                    all_results.extend(results_list)
+                    
+        except asyncio.TimeoutError:
+            # Собираем результаты от завершившихся задач
+            for task in search_tasks:
+                if task.done() and not task.exception():
+                    results = task.result()
+                    if isinstance(results, list):
+                        all_results.extend(results)
+        
+        if not all_results:
+            return []
+        
+        # Оцениваем релевантность каждого результата
+        scored_results = []
+        for result in all_results:
+            if not result or not result.get('document'):
+                continue
+            
+            # Извлекаем информацию о треке
+            track_info = self.extract_track_info_from_document(
+                result['document'], 
+                result.get('raw_title', '')
+            )
+            
+            # Объединяем с имеющимися данными
+            track_info.update({
+                'bot': result.get('bot', ''),
+                'document': result['document'],
+                'result_id': result.get('result_id', 0),
+                'original_result': result.get('original_result')
+            })
+            
+            # Рассчитываем релевантность
+            score = self.calculate_relevance_score(track_info, cleaned_query)
+            
+            # Дополнительный бонус за ботов, которые обычно дают хорошие результаты
+            preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
+            if track_info['bot'] in preferred_bots:
+                score += 5
+            
+            scored_results.append((score, track_info))
+        
+        if not scored_results:
+            return []
+        
+        # Сортируем по релевантности
+        scored_results.sort(key=lambda x: x[0], reverse=True)
+        
+        # Берем топ-6 результатов для инлайн-отображения
+        top_results = scored_results[:6]
+        
+        return [result for score, result in top_results]
 
     @loader.command(
         ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
@@ -325,6 +403,84 @@ class InsMusic(loader.Module):
             await message.delete()
             error_message = await message.respond(f"Ошибка: {str(error)}")
             await self.delete_after(error_message, 3)
+
+    @loader.command(
+        ru_doc="<название> - Инлайн-поиск музыки (работает через инлайн)",
+        en_doc="<title> - Inline music search (works via inline)"
+    )
+    async def миcmd(self, message: Message):
+        """Инлайн-поиск музыки"""
+        args = utils.get_args_raw(message)
+        
+        if not args:
+            await utils.answer(message, "🚫 Укажите название песни для поиска!")
+            return
+        
+        try:
+            # Показываем инлайн-кнопки с результатами поиска
+            await self.inline.form(
+                text=f"<emoji document_id=5330324623613533041>⏰</emoji> <b>Поиск:</b> {args}\n\nВыберите подходящий трек:",
+                message=message,
+                reply_markup=await self._build_music_buttons(args, message),
+                silent=True
+            )
+        except Exception as e:
+            await utils.answer(message, f"❌ Ошибка: {str(e)}")
+
+    async def _build_music_buttons(self, query: str, message: Message):
+        """Создает кнопки с результатами поиска"""
+        # Ищем музыку
+        results = await self.search_music_inline(query, message)
+        
+        if not results:
+            return [[{"text": "❌ Ничего не найдено", "action": "close"}]]
+        
+        # Создаем кнопки для каждого результата
+        buttons = []
+        for i, result in enumerate(results[:6], 1):
+            # Формируем название трека
+            title = result.get('title', 'Неизвестный трек')
+            performer = result.get('performer', '')
+            
+            if performer:
+                display_name = f"{i}. {performer} - {title}"
+            else:
+                display_name = f"{i}. {title}"
+            
+            # Обрезаем длинное название
+            if len(display_name) > 40:
+                display_name = display_name[:37] + "..."
+            
+            # Создаем кнопку с данными трека
+            buttons.append([{
+                "text": f"🎵 {display_name}",
+                "callback": self._send_music_callback,
+                "args": (result['document'], message)
+            }])
+        
+        # Добавляем кнопку закрытия
+        buttons.append([{"text": "❌ Закрыть", "action": "close"}])
+        
+        return buttons
+
+    async def _send_music_callback(self, call, document, original_message):
+        """Callback для отправки выбранной музыки"""
+        try:
+            # Отвечаем на callback
+            await call.answer("🎵 Отправляю музыку...")
+            
+            # Закрываем инлайн-форму
+            await call.delete()
+            
+            # Отправляем музыку
+            await original_message.client.send_file(
+                original_message.to_id,
+                document,
+                reply_to=original_message.id
+            )
+            
+        except Exception as e:
+            await call.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
 
     async def watcher(self, message):
         if not message.text:
