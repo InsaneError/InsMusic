@@ -413,19 +413,19 @@ class InsMusic(loader.Module):
         args = utils.get_args_raw(message)
         
         if not args:
-            await utils.answer(message, "🚫 Укажите название песни для поиска!")
+            await utils.answer(message, "Укажите название песни для поиска!")
             return
         
         try:
             # Показываем инлайн-кнопки с результатами поиска
             await self.inline.form(
-                text=f"<emoji document_id=5330324623613533041>⏰</emoji> <b>Поиск:</b> {args}\n\nВыберите подходящий трек:",
+                text=f"<emoji document_id=5330324623613533041>⏰</emoji>"
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
             )
         except Exception as e:
-            await utils.answer(message, f"❌ Ошибка: {str(e)}")
+            await utils.answer(message, f"Ошибка: {str(e)}")
 
     async def _build_music_buttons(self, query: str, message: Message):
         """Создает кнопки с результатами поиска"""
@@ -433,7 +433,7 @@ class InsMusic(loader.Module):
         results = await self.search_music_inline(query, message)
         
         if not results:
-            return [[{"text": "❌ Ничего не найдено", "action": "close"}]]
+            return [[{"text": "Ничего не найдено", "action": "close"}]]
         
         # Создаем кнопки для каждого результата
         buttons = []
@@ -453,13 +453,13 @@ class InsMusic(loader.Module):
             
             # Создаем кнопку с данными трека
             buttons.append([{
-                "text": f"🎵 {display_name}",
+                "text": f"{display_name}",
                 "callback": self._send_music_callback,
                 "args": (result['document'], message)
             }])
         
         # Добавляем кнопку закрытия
-        buttons.append([{"text": "❌ Закрыть", "action": "close"}])
+        buttons.append([{"text": "Закрыть", "action": "close"}])
         
         return buttons
 
@@ -480,7 +480,7 @@ class InsMusic(loader.Module):
             )
             
         except Exception as e:
-            await call.answer(f"❌ Ошибка: {str(e)}", show_alert=True)
+            await call.answer(f"Ошибка: {str(e)}", show_alert=True)
 
     async def watcher(self, message):
         if not message.text:
