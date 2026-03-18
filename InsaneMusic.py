@@ -467,7 +467,7 @@ class InsMusic(loader.Module):
         """Callback для отправки выбранной музыки"""
         try:
             
-            await call.answer("МиМиМи")
+            await call.answer(f"<emoji document_id=5330324623613533041>⏰</emoji>")
             
             
             await call.delete()
