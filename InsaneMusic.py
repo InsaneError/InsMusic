@@ -65,8 +65,8 @@ class InsMusic(loader.Module):
                 return []
             
             music_results = []
-            # Собираем до 6 результатов от каждого бота
-            for i in range(min(len(results), 6)):
+            
+            for i in range(min(len(results), 7)):
                 result = results[i]
                 if hasattr(result.result, 'document') and result.result.document:
                     try:
@@ -74,14 +74,14 @@ class InsMusic(loader.Module):
                         title = ""
                         performer = ""
                         
-                        # Пытаемся извлечь название и исполнителя из атрибутов документа
+                 
                         for attr in doc.attributes:
                             if hasattr(attr, 'title'):
                                 title = attr.title
                             if hasattr(attr, 'performer'):
                                 performer = attr.performer
                         
-                        # Если не удалось получить через атрибуты, пробуем из заголовка результата
+                       
                         if not title and hasattr(result.result, 'title'):
                             title = result.result.title
                         
@@ -91,8 +91,8 @@ class InsMusic(loader.Module):
                             'title': title,
                             'performer': performer,
                             'raw_title': result.result.title if hasattr(result.result, 'title') else '',
-                            'result_id': i,  # Добавляем ID результата
-                            'original_result': result  # Сохраняем оригинальный результат
+                            'result_id': i,  
+                            'original_result': result  
                         })
                     except Exception:
                         continue
@@ -104,7 +104,7 @@ class InsMusic(loader.Module):
 
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
-        # Удаляем лишние пробелы и специальные символы
+        
         query = re.sub(r'[^\w\s-]', ' ', query)
         query = re.sub(r'\s+', ' ', query).strip()
         return query
@@ -253,10 +253,10 @@ class InsMusic(loader.Module):
                 'original_result': result.get('original_result')
             })
             
-            # Рассчитываем релевантность
+            
             score = self.calculate_relevance_score(track_info, cleaned_query)
             
-            # Дополнительный бонус за ботов, которые обычно дают хорошие результаты
+           
             preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
             if track_info['bot'] in preferred_bots:
                 score += 5
@@ -266,15 +266,15 @@ class InsMusic(loader.Module):
         if not scored_results:
             return None
         
-        # Сортируем по релевантности
+        
         scored_results.sort(key=lambda x: x[0], reverse=True)
         
-        # Логируем топ-3 результата для отладки
+        
         best_score, best_result = scored_results[0]
         
-        # Если лучший результат имеет слишком низкий балл, пробуем взять первый попавшийся
+        
         if best_score < 10 and len(scored_results) > 1:
-            # Возвращаем первый результат (часто самый популярный)
+            
             return scored_results[0][1]['document']
         
         return best_result['document']
@@ -288,12 +288,12 @@ class InsMusic(loader.Module):
         cleaned_query = self.clean_query(query)
         search_tasks = []
         
-        # Запускаем поиск во всех ботах
+        
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
             search_tasks.append(task)
         
-        # Собираем все результаты
+        
         all_results = []
         try:
             results_lists = await asyncio.wait_for(
@@ -306,7 +306,7 @@ class InsMusic(loader.Module):
                     all_results.extend(results_list)
                     
         except asyncio.TimeoutError:
-            # Собираем результаты от завершившихся задач
+            
             for task in search_tasks:
                 if task.done() and not task.exception():
                     results = task.result()
@@ -316,19 +316,19 @@ class InsMusic(loader.Module):
         if not all_results:
             return []
         
-        # Оцениваем релевантность каждого результата
+        
         scored_results = []
         for result in all_results:
             if not result or not result.get('document'):
                 continue
             
-            # Извлекаем информацию о треке
+            
             track_info = self.extract_track_info_from_document(
                 result['document'], 
                 result.get('raw_title', '')
             )
             
-            # Объединяем с имеющимися данными
+            
             track_info.update({
                 'bot': result.get('bot', ''),
                 'document': result['document'],
@@ -336,10 +336,10 @@ class InsMusic(loader.Module):
                 'original_result': result.get('original_result')
             })
             
-            # Рассчитываем релевантность
+            
             score = self.calculate_relevance_score(track_info, cleaned_query)
             
-            # Дополнительный бонус за ботов, которые обычно дают хорошие результаты
+            
             preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
             if track_info['bot'] in preferred_bots:
                 score += 5
@@ -349,11 +349,11 @@ class InsMusic(loader.Module):
         if not scored_results:
             return []
         
-        # Сортируем по релевантности
+        
         scored_results.sort(key=lambda x: x[0], reverse=True)
         
-        # Берем топ-6 результатов для инлайн-отображения
-        top_results = scored_results[:6]
+        
+        top_results = scored_results[:7]
         
         return [result for score, result in top_results]
 
@@ -363,7 +363,7 @@ class InsMusic(loader.Module):
     )
     async def мcmd(self, message):
         """Поиск музыки по названию"""
-        # Проверка на спам
+        
         user_id = message.sender_id
         if not self.check_spam(user_id):
             await message.delete()
@@ -392,11 +392,11 @@ class InsMusic(loader.Module):
                 return
 
             await searching_message.delete()
-            # Отправляем реплаем на команду
+            
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=message.id  # Всегда отправляем реплаем на команду
+                reply_to=message.id  
             )
 
         except Exception as error:
@@ -417,9 +417,9 @@ class InsMusic(loader.Module):
             return
         
         try:
-            # Показываем инлайн-кнопки с результатами поиска
+           
             await self.inline.form(
-                text=f"<emoji document_id=5330324623613533041>⏰</emoji>"
+                text=f"<emoji document_id=5330324623613533041>⏰</emoji>",
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
@@ -429,16 +429,16 @@ class InsMusic(loader.Module):
 
     async def _build_music_buttons(self, query: str, message: Message):
         """Создает кнопки с результатами поиска"""
-        # Ищем музыку
+        
         results = await self.search_music_inline(query, message)
         
         if not results:
             return [[{"text": "Ничего не найдено", "action": "close"}]]
         
-        # Создаем кнопки для каждого результата
+        
         buttons = []
         for i, result in enumerate(results[:6], 1):
-            # Формируем название трека
+            
             title = result.get('title', 'Неизвестный трек')
             performer = result.get('performer', '')
             
@@ -447,18 +447,18 @@ class InsMusic(loader.Module):
             else:
                 display_name = f"{i}. {title}"
             
-            # Обрезаем длинное название
+            
             if len(display_name) > 40:
                 display_name = display_name[:37] + "..."
             
-            # Создаем кнопку с данными трека
+            
             buttons.append([{
                 "text": f"{display_name}",
                 "callback": self._send_music_callback,
                 "args": (result['document'], message)
             }])
         
-        # Добавляем кнопку закрытия
+        
         buttons.append([{"text": "Закрыть", "action": "close"}])
         
         return buttons
@@ -466,13 +466,13 @@ class InsMusic(loader.Module):
     async def _send_music_callback(self, call, document, original_message):
         """Callback для отправки выбранной музыки"""
         try:
-            # Отвечаем на callback
-            await call.answer("🎵 Отправляю музыку...")
             
-            # Закрываем инлайн-форму
+            await call.answer(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+            
+            
             await call.delete()
             
-            # Отправляем музыку
+            
             await original_message.client.send_file(
                 original_message.to_id,
                 document,
@@ -501,7 +501,7 @@ class InsMusic(loader.Module):
 
         text_lower = message.text.lower()
         if text_lower.startswith("найти "):
-            # Проверка на спам
+            
             user_id = message.sender_id
             if not self.check_spam(user_id):
                 await message.delete()
@@ -521,11 +521,11 @@ class InsMusic(loader.Module):
                     return
 
                 await searching_message.delete()
-                # Отправляем реплаем на команду "найти"
+                
                 await message.client.send_file(
                     message.to_id,
                     music_document,
-                    reply_to=message.id  # Реплаем на команду "найти"
+                    reply_to=message.id
                 )
 
             except Exception as error:
