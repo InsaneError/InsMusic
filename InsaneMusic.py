@@ -254,79 +254,62 @@ class InsMusic(loader.Module):
             return await self.search_music_all_bots(query, message)
 
     async def search_music_inline(self, query, message, offset=0):
-        """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
+        """Поиск музыки для инлайн-режима с возвратом нескольких результатов (только Lybot)"""
         cleaned_query = self.clean_query(query)
-        search_tasks = []
         
-        for bot_username in self.music_bots:
-            task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
-            search_tasks.append(task)
+        # Используем только Lybot для инлайн-поиска
+        bot_username = "Lybot"
         
-        all_results = []
         try:
-            results_lists = await asyncio.wait_for(
-                asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=40.0
-            )
+            results = await self.search_in_bot(bot_username, cleaned_query, message)
             
-            for results_list in results_lists:
-                if isinstance(results_list, list):
-                    all_results.extend(results_list)
-                    
-        except asyncio.TimeoutError:
-            for task in search_tasks:
-                if task.done() and not task.exception():
-                    results = task.result()
-                    if isinstance(results, list):
-                        all_results.extend(results)
-        
-        if not all_results:
+            if not results:
+                return []
+            
+            # Обрабатываем результаты
+            scored_results = []
+            for result in results:
+                if not result or not result.get('document'):
+                    continue
+                
+                track_info = self.extract_track_info_from_document(
+                    result['document'], 
+                    result.get('raw_title', '')
+                )
+                
+                track_info.update({
+                    'bot': result.get('bot', ''),
+                    'document': result['document'],
+                    'result_id': result.get('result_id', 0),
+                    'original_result': result.get('original_result')
+                })
+                
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                scored_results.append((score, track_info))
+            
+            if not scored_results:
+                return []
+            
+            scored_results.sort(key=lambda x: x[0], reverse=True)
+            
+            # Убираем дубликаты на основе документа
+            unique_results = []
+            seen_documents = set()
+            
+            for score, track_info in scored_results:
+                doc_id = id(track_info['document'])
+                if doc_id not in seen_documents:
+                    seen_documents.add(doc_id)
+                    unique_results.append(track_info)
+                
+                if len(unique_results) >= 10:
+                    break
+            
+            return unique_results
+            
+        except Exception as e:
+            print(f"Ошибка при поиске в Lybot: {e}")
             return []
-        
-        scored_results = []
-        for result in all_results:
-            if not result or not result.get('document'):
-                continue
-            
-            track_info = self.extract_track_info_from_document(
-                result['document'], 
-                result.get('raw_title', '')
-            )
-            
-            track_info.update({
-                'bot': result.get('bot', ''),
-                'document': result['document'],
-                'result_id': result.get('result_id', 0),
-                'original_result': result.get('original_result')
-            })
-            
-            score = self.calculate_relevance_score(track_info, cleaned_query)
-            
-            preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
-            if track_info['bot'] in preferred_bots:
-                score += 5
-            
-            scored_results.append((score, track_info))
-        
-        if not scored_results:
-            return []
-        
-        scored_results.sort(key=lambda x: x[0], reverse=True)
-        
-        # Убираем дубликаты на основе документа
-        unique_results = []
-        seen_documents = set()
-        
-        for score, track_info in scored_results:
-            doc_id = id(track_info['document'])  # Используем id документа как уникальный идентификатор
-            if doc_id not in seen_documents:
-                seen_documents.add(doc_id)
-                unique_results.append(track_info)
-            
-            if len(unique_results) >= 10:  # Ограничиваем до 10 уникальных результатов
-                break
-        
-        return unique_results
 
     @loader.command(
         ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
@@ -380,7 +363,7 @@ class InsMusic(loader.Module):
         en_doc="<title> - Inline music search (works via inline)"
     )
     async def миcmd(self, message: Message):
-        """Инлайн-поиск музыки"""
+        """Инлайн-поиск музыки (только через Lybot)"""
         args = utils.get_args_raw(message)
         
         if not args:
