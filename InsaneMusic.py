@@ -258,7 +258,7 @@ class InsMusic(loader.Module):
         cleaned_query = self.clean_query(query)
         
         # Используем только Lybot для инлайн-поиска
-        bot_username = "lyadownbot"
+        bot_username = "lybot"
         
         try:
             results = await self.search_in_bot(bot_username, cleaned_query, message)
