@@ -183,71 +183,111 @@ class InsMusic(loader.Module):
         }
 
     async def search_music_all_bots(self, query, message):
-        """Улучшенный поиск по всем ботам с анализом нескольких результатов"""
+        """Улучшенный поиск по всем ботам с получением первого найденного релевантного результата"""
         cleaned_query = self.clean_query(query)
-        search_tasks = []
         
+        # Создаем задачи для всех ботов
+        search_tasks = []
         for bot_username in self.music_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
             search_tasks.append(task)
         
+        start_time = time.time()
+        timeout = 60.0  # Ищем до минуты
+        
+        # Список для сбора всех результатов по мере поступления
         all_results = []
-        try:
-            results_lists = await asyncio.wait_for(
-                asyncio.gather(*search_tasks, return_exceptions=True),
-                timeout=12.0
-            )
+        
+        while time.time() - start_time < timeout:
+            # Проверяем завершенные задачи
+            completed = [t for t in search_tasks if t.done()]
             
-            for results_list in results_lists:
-                if isinstance(results_list, list):
-                    all_results.extend(results_list)
+            for task in completed:
+                if task not in search_tasks:
+                    continue
                     
-        except asyncio.TimeoutError:
-            for task in search_tasks:
-                if task.done() and not task.exception():
+                try:
                     results = task.result()
-                    if isinstance(results, list):
+                    if isinstance(results, list) and results:
                         all_results.extend(results)
-        
-        if not all_results:
-            return None
-        
-        scored_results = []
-        for result in all_results:
-            if not result or not result.get('document'):
-                continue
+                        
+                        # Если нашли результаты, проверяем есть ли среди них релевантные
+                        scored_results = []
+                        for result in results:
+                            if not result or not result.get('document'):
+                                continue
+                            
+                            track_info = self.extract_track_info_from_document(
+                                result['document'], 
+                                result.get('raw_title', '')
+                            )
+                            
+                            track_info.update({
+                                'bot': result.get('bot', ''),
+                                'document': result['document'],
+                                'result_id': result.get('result_id', 0),
+                                'original_result': result.get('original_result')
+                            })
+                            
+                            score = self.calculate_relevance_score(track_info, cleaned_query)
+                            scored_results.append((score, track_info))
+                        
+                        if scored_results:
+                            scored_results.sort(key=lambda x: x[0], reverse=True)
+                            best_score, best_result = scored_results[0]
+                            
+                            # Если нашли достаточно релевантный результат (score >= 15), возвращаем сразу
+                            if best_score >= 15:
+                                return best_result['document']
+                    
+                except Exception:
+                    pass
+                
+                # Убираем выполненную задачу из списка ожидающих
+                if task in search_tasks:
+                    search_tasks.remove(task)
             
-            track_info = self.extract_track_info_from_document(
-                result['document'], 
-                result.get('raw_title', '')
-            )
+            # Если все задачи выполнены и результатов нет, выходим
+            if not search_tasks and not all_results:
+                break
             
-            track_info.update({
-                'bot': result.get('bot', ''),
-                'document': result['document'],
-                'result_id': result.get('result_id', 0),
-                'original_result': result.get('original_result')
-            })
+            # Если остались незавершенные задачи, ждем немного
+            if search_tasks:
+                await asyncio.sleep(0.5)
+        
+        # Если дошли до минуты и есть результаты, берем лучший из всех собранных
+        if all_results:
+            all_scored_results = []
+            for result in all_results:
+                if not result or not result.get('document'):
+                    continue
+                
+                track_info = self.extract_track_info_from_document(
+                    result['document'], 
+                    result.get('raw_title', '')
+                )
+                
+                track_info.update({
+                    'bot': result.get('bot', ''),
+                    'document': result['document'],
+                    'result_id': result.get('result_id', 0),
+                    'original_result': result.get('original_result')
+                })
+                
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                
+                preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
+                if track_info['bot'] in preferred_bots:
+                    score += 5
+                
+                all_scored_results.append((score, track_info))
             
-            score = self.calculate_relevance_score(track_info, cleaned_query)
-            
-            preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
-            if track_info['bot'] in preferred_bots:
-                score += 5
-            
-            scored_results.append((score, track_info))
+            if all_scored_results:
+                all_scored_results.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_result = all_scored_results[0]
+                return best_result['document']
         
-        if not scored_results:
-            return None
-        
-        scored_results.sort(key=lambda x: x[0], reverse=True)
-        
-        best_score, best_result = scored_results[0]
-        
-        if best_score < 10 and len(scored_results) > 1:
-            return scored_results[0][1]['document']
-        
-        return best_result['document']
+        return None
 
     async def search_music(self, query, message):
         async with self.search_lock:
