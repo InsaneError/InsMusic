@@ -14,6 +14,8 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
+        self.bot = "WersModule_Musicbot"
+        self.cache = {}
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -26,6 +28,14 @@ class InsMusic(loader.Module):
         if not self.database.get("InsMusic", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
+
+        if not self.database.get("InsMusic", "emojis_enabled"):
+            self.database.set("InsMusic", "emojis_enabled", True)
+
+        bots = self.music_bots.copy()
+        if self.bot not in bots:
+            bots.append(self.bot)
+            self.music_bots = bots
 
     @property
     def allowed_chats(self):
@@ -42,6 +52,20 @@ class InsMusic(loader.Module):
     @music_bots.setter
     def music_bots(self, value):
         self.database.set("InsMusic", "music_bots", value)
+
+    @property
+    def emojis_enabled(self):
+        return self.database.get("InsMusic", "emojis_enabled", True)
+
+    @emojis_enabled.setter
+    def emojis_enabled(self, value):
+        self.database.set("InsMusic", "emojis_enabled", value)
+
+    def clock_emoji(self):
+        """Возвращает эмодзи часов или текст в зависимости от настройки"""
+        if self.emojis_enabled:
+            return "<emoji document_id=5330324623613533041>⏰</emoji>"
+        return "<emoji document_id=5330324623613533041>⏰</emoji>"
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -99,6 +123,91 @@ class InsMusic(loader.Module):
             
         except (asyncio.TimeoutError, Exception):
             return []
+
+    async def search_in_wers_bot(self, query, message, status_msg):
+        """Поиск с выбором трека"""
+        try:
+            try:
+                bot = await self.client.get_entity(self.bot)
+            except Exception:
+                return None
+
+            async with self.client.conversation(bot, timeout=60) as conv:
+                await conv.send_message(query)
+                
+                resp = None
+                for _ in range(15):
+                    r = await conv.get_response()
+                    if r.text and any(e in r.text for e in ["", ""]):
+                        continue
+                    if r.buttons:
+                        resp = r
+                        break
+                    await asyncio.sleep(0.3)
+
+                if not resp:
+                    return None
+
+                tracks = []
+                for row in resp.buttons:
+                    for btn in row:
+                        if hasattr(btn, 'text') and btn.text:
+                            t = btn.text.strip()
+                            skip = [ "Назад", "Вперед", "Больше", ".", "Отмена", "Закрыть", "Добавить"]
+                            if t and len(t) > 3 and not any(s in t for s in skip):
+                                tracks.append({"title": t, "btn": btn})
+
+                if not tracks:
+                    return None
+
+                cleaned_query = self.clean_query(query).lower()
+                best_track = None
+                best_score = -1
+
+                for track in tracks:
+                    score = 0
+                    title_lower = track['title'].lower()
+                    
+                    query_words = cleaned_query.split()
+                    matched = sum(1 for w in query_words if w in title_lower)
+                    score = matched / len(query_words) * 100
+                    
+                    if cleaned_query in title_lower:
+                        score += 50
+                    
+                    if score > best_score:
+                        best_score = score
+                        best_track = track
+
+                if best_track and best_score >= 30:
+                    await best_track['btn'].click()
+                    await asyncio.sleep(1)
+                    
+                    audio_msg = None
+                    for _ in range(30):
+                        await asyncio.sleep(0.5)
+                        messages = await self.client.get_messages(self.bot, limit=2)
+                        
+                        for msg in messages:
+                            if msg.media:
+                                if msg.text and "Загрузка" in msg.text:
+                                    break
+                                else:
+                                    audio_msg = msg
+                                    break
+                        
+                        if audio_msg:
+                            break
+
+                    if audio_msg and audio_msg.media:
+                        return audio_msg.media
+
+                return None
+
+        except asyncio.TimeoutError:
+            return None
+        except Exception as e:
+            return None
 
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
@@ -186,20 +295,19 @@ class InsMusic(loader.Module):
         """Улучшенный поиск по всем ботам с получением первого найденного релевантного результата"""
         cleaned_query = self.clean_query(query)
         
-        # Создаем задачи для всех ботов
+        inline_bots = [b for b in self.music_bots if b != self.bot]
+        
         search_tasks = []
-        for bot_username in self.music_bots:
+        for bot_username in inline_bots:
             task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
             search_tasks.append(task)
         
         start_time = time.time()
-        timeout = 60.0  # Ищем до минуты
+        timeout = 10.0
         
-        # Список для сбора всех результатов по мере поступления
         all_results = []
         
         while time.time() - start_time < timeout:
-            # Проверяем завершенные задачи
             completed = [t for t in search_tasks if t.done()]
             
             for task in completed:
@@ -211,7 +319,6 @@ class InsMusic(loader.Module):
                     if isinstance(results, list) and results:
                         all_results.extend(results)
                         
-                        # Если нашли результаты, проверяем есть ли среди них релевантные
                         scored_results = []
                         for result in results:
                             if not result or not result.get('document'):
@@ -236,26 +343,21 @@ class InsMusic(loader.Module):
                             scored_results.sort(key=lambda x: x[0], reverse=True)
                             best_score, best_result = scored_results[0]
                             
-                            # Если нашли достаточно релевантный результат (score >= 15), возвращаем сразу
-                            if best_score >= 15:
+                            if best_score >= 25:
                                 return best_result['document']
                     
                 except Exception:
                     pass
                 
-                # Убираем выполненную задачу из списка ожидающих
                 if task in search_tasks:
                     search_tasks.remove(task)
             
-            # Если все задачи выполнены и результатов нет, выходим
             if not search_tasks and not all_results:
                 break
             
-            # Если остались незавершенные задачи, ждем немного
             if search_tasks:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
         
-        # Если дошли до минуты и есть результаты, берем лучший из всех собранных
         if all_results:
             all_scored_results = []
             for result in all_results:
@@ -285,19 +387,25 @@ class InsMusic(loader.Module):
             if all_scored_results:
                 all_scored_results.sort(key=lambda x: x[0], reverse=True)
                 best_score, best_result = all_scored_results[0]
-                return best_result['document']
+                if best_score >= 15:
+                    return best_result['document']
         
         return None
 
-    async def search_music(self, query, message):
+    async def search_music(self, query, message, status_msg=None):
+        """Основной метод поиска с фоллбеком на WersModule_Musicbot"""
         async with self.search_lock:
-            return await self.search_music_all_bots(query, message)
+            result = await self.search_music_all_bots(query, message)
+            
+            if not result:
+                result = await self.search_in_wers_bot(query, message, status_msg)
+            
+            return result
 
     async def search_music_inline(self, query, message, offset=0):
         """Поиск музыки для инлайн-режима с возвратом нескольких результатов (только Lybot)"""
         cleaned_query = self.clean_query(query)
         
-        # Используем только Lybot для инлайн-поиска
         bot_username = "lybot"
         
         try:
@@ -306,7 +414,6 @@ class InsMusic(loader.Module):
             if not results:
                 return []
             
-            # Обрабатываем результаты
             scored_results = []
             for result in results:
                 if not result or not result.get('document'):
@@ -332,7 +439,6 @@ class InsMusic(loader.Module):
             
             scored_results.sort(key=lambda x: x[0], reverse=True)
             
-            # Убираем дубликаты на основе документа
             unique_results = []
             seen_documents = set()
             
@@ -351,37 +457,16 @@ class InsMusic(loader.Module):
             print(f"Ошибка при поиске в Lybot: {e}")
             return []
 
-    @loader.command(
-        ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
-        en_doc="<title> - Search music by title (works with prefix)"
-    )
-    async def мcmd(self, message):
-        """Поиск музыки по названию"""
-        
-        user_id = message.sender_id
-        if not self.check_spam(user_id):
-            await message.delete()
-            error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
-            await self.delete_after(error_message, 3)
-            return
-        
-        search_query = utils.get_args_raw(message)
-        reply_message = await message.get_reply_message()
-
-        if not search_query:
-            await message.delete()
-            error_message = await message.respond("Укажите название песни!")
-            await self.delete_after(error_message, 3)
-            return
-
+    async def _execute_search_and_send(self, message, search_query):
+        """Общая логика поиска и отправки музыки"""
         try:
             await message.delete()
-            searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+            searching_message = await message.respond(self.clock_emoji())
 
-            music_document = await self.search_music(search_query, message)
+            music_document = await self.search_music(search_query, message, searching_message)
 
             if not music_document:
-                await searching_message.edit("Музыка не найдена")
+                await searching_message.edit("<b>Музыка не найдена</b>")
                 await self.delete_after(searching_message, 3)
                 return
 
@@ -399,6 +484,30 @@ class InsMusic(loader.Module):
             await self.delete_after(error_message, 3)
 
     @loader.command(
+        ru_doc="<название> - Ищет музыку по названию (работает с префиксом)",
+        en_doc="<title> - Search music by title (works with prefix)"
+    )
+    async def мcmd(self, message):
+        """Поиск музыки по названию"""
+        
+        user_id = message.sender_id
+        if not self.check_spam(user_id):
+            await message.delete()
+            error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
+            await self.delete_after(error_message, 3)
+            return
+        
+        search_query = utils.get_args_raw(message)
+
+        if not search_query:
+            await message.delete()
+            error_message = await message.respond("Укажите название песни!")
+            await self.delete_after(error_message, 3)
+            return
+
+        await self._execute_search_and_send(message, search_query)
+
+    @loader.command(
         ru_doc="<название> - Инлайн-поиск музыки (работает через инлайн)",
         en_doc="<title> - Inline music search (works via inline)"
     )
@@ -411,11 +520,11 @@ class InsMusic(loader.Module):
             return
         
         await message.delete()
-        emoji_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
+        emoji_message = await message.respond(self.clock_emoji())
         
         try:
             await self.inline.form(
-                text="МИнлайн",
+                text="Выберите трек:",
                 message=message,
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
@@ -460,9 +569,7 @@ class InsMusic(loader.Module):
     async def _send_music_callback(self, call, document, original_message):
         """Callback для отправки выбранной музыки"""
         try:
-            
-            await call.answer(f"<emoji document_id=5330324623613533041>⏰</emoji>")
-            
+            await call.answer(self.clock_emoji())
             await call.delete()
             
             await original_message.client.send_file(
@@ -492,42 +599,60 @@ class InsMusic(loader.Module):
                 return
 
         text_lower = message.text.lower()
+        
         if text_lower.startswith("найти "):
-            
             user_id = message.sender_id
             if not self.check_spam(user_id):
                 await message.delete()
                 return
             
             search_query = message.text[6:]
-
+            await self._execute_search_and_send(message, search_query)
+        
+        elif text_lower.startswith("найтими "):
+            user_id = message.sender_id
+            if not self.check_spam(user_id):
+                await message.delete()
+                return
+            
+            search_query = message.text[8:]
+            
             try:
                 await message.delete()
-                searching_message = await message.respond(f"<emoji document_id=5330324623613533041>⏰</emoji>")
-
-                music_document = await self.search_music(search_query, message)
-
-                if not music_document:
-                    await searching_message.edit("Музыка не найдена")
-                    await self.delete_after(searching_message, 3)
-                    return
-
-                await searching_message.delete()
+                emoji_message = await message.respond(self.clock_emoji())
                 
-                await message.client.send_file(
-                    message.to_id,
-                    music_document,
-                    reply_to=message.id
+                await self.inline.form(
+                    text="Выберите трек:",
+                    message=message,
+                    reply_markup=await self._build_music_buttons(search_query, message),
+                    silent=True
                 )
-
-            except Exception as error:
-                await message.delete()
-                error_message = await message.respond(f"Ошибка: {str(error)}")
+                await emoji_message.delete()
+            except Exception as e:
+                try:
+                    await emoji_message.delete()
+                except:
+                    pass
+                error_message = await message.respond(f"Ошибка: {str(e)}")
                 await self.delete_after(error_message, 3)
 
     async def delete_after(self, message, seconds):
         await asyncio.sleep(seconds)
         await message.delete()
+
+    @loader.command(
+        ru_doc="Включает/выключает эмодзи в сообщениях модуля",
+        en_doc="Toggles emojis in module messages on/off"
+    )
+    async def togglemcmd(self, message):
+        """Вкл/Выкл эмодзи"""
+        current = self.emojis_enabled
+        self.emojis_enabled = not current
+        
+        if self.emojis_enabled:
+            await message.edit(f"{self.clock_emoji()} <b>Эмодзи включены</b>")
+        else:
+            await message.edit(" <b>Эмодзи выключены</b>")
 
     @loader.command(
         ru_doc="Добавляет текущий чат в список разрешенных для команды без префикса",
@@ -653,3 +778,7 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
+
+
+
+#జ్ఞ ну что бы ты не смотрел мой модуль через модуль
