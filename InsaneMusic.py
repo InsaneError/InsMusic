@@ -3,6 +3,7 @@ import asyncio
 import time
 import re
 from telethon.tl.types import Message
+#జ్ఞ ну что бы ты не смотрел мой модуль через модуль
 
 
 class InsMusic(loader.Module):
