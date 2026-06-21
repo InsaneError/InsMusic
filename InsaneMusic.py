@@ -16,6 +16,7 @@ class InsMusic(loader.Module):
         self.spam_protection = {}
         self.bot = "WersModule_Musicbot"
         self.cache = {}
+        self.sent_tracks = {}  # {chat_id: set(track_ids)}
         super().__init__()
 
     async def client_ready(self, client, database):
@@ -76,6 +77,48 @@ class InsMusic(loader.Module):
                 return False
         self.spam_protection[user_id] = current_time
         return True
+
+    def _get_track_id(self, document):
+        """Генерирует уникальный ID для трека на основе его атрибутов"""
+        try:
+            if hasattr(document, 'id'):
+                return str(document.id)
+            
+            title = ""
+            performer = ""
+            for attr in document.attributes:
+                if hasattr(attr, 'title'):
+                    title = attr.title
+                if hasattr(attr, 'performer'):
+                    performer = attr.performer
+            
+            if title and performer:
+                return f"{performer}-{title}".lower()
+            elif title:
+                return title.lower()
+            elif hasattr(document, 'name') and document.name:
+                return document.name.lower()
+            
+            return str(hash(str(document)))
+        except Exception:
+            return str(hash(str(document)))
+
+    async def _send_with_reply(self, to_id, file, reply_to_msg):
+        """Отправляет файл с учетом темы"""
+        try:
+            return await self.client.send_file(
+                to_id,
+                file,
+                reply_to=reply_to_msg.id
+            )
+        except Exception as e:
+            if "TOPIC_CLOSED" in str(e):
+                # Если тема закрыта, отправляем без reply_to
+                return await self.client.send_file(
+                    to_id,
+                    file
+                )
+            raise e
 
     async def search_in_bot(self, bot_username, query, message):
         """Улучшенный поиск в одном боте с получением нескольких результатов"""
@@ -439,11 +482,19 @@ class InsMusic(loader.Module):
             
             scored_results.sort(key=lambda x: x[0], reverse=True)
             
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            sent_in_chat = self.sent_tracks.get(chat_id, set())
+            
             unique_results = []
             seen_documents = set()
             
             for score, track_info in scored_results:
                 doc_id = id(track_info['document'])
+                track_id = self._get_track_id(track_info['document'])
+                
+                if track_id in sent_in_chat:
+                    continue
+                
                 if doc_id not in seen_documents:
                     seen_documents.add(doc_id)
                     unique_results.append(track_info)
@@ -466,17 +517,25 @@ class InsMusic(loader.Module):
             music_document = await self.search_music(search_query, message, searching_message)
 
             if not music_document:
-                await searching_message.edit("<b>Музыка не найдена</b>")
+                await searching_message.edit("Музыка не найдена")
                 await self.delete_after(searching_message, 3)
                 return
 
             await searching_message.delete()
             
-            await message.client.send_file(
+            sent_msg = await self._send_with_reply(
                 message.to_id,
                 music_document,
-                reply_to=message.id
+                message
             )
+            
+            if sent_msg and sent_msg.media:
+                track_id = self._get_track_id(music_document)
+                chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+                
+                if chat_id not in self.sent_tracks:
+                    self.sent_tracks[chat_id] = set()
+                self.sent_tracks[chat_id].add(track_id)
 
         except Exception as error:
             await message.delete()
@@ -572,11 +631,24 @@ class InsMusic(loader.Module):
             await call.answer(self.clock_emoji())
             await call.delete()
             
-            await original_message.client.send_file(
+            track_id = self._get_track_id(document)
+            chat_id = str(original_message.chat_id if hasattr(original_message, 'chat_id') else original_message.to_id)
+            
+            if chat_id not in self.sent_tracks:
+                self.sent_tracks[chat_id] = set()
+            
+            if track_id in self.sent_tracks[chat_id]:
+                await call.answer("Этот трек уже был отправлен в чат!", show_alert=True)
+                return
+            
+            sent_msg = await self._send_with_reply(
                 original_message.to_id,
                 document,
-                reply_to=original_message.id
+                original_message
             )
+            
+            if sent_msg and sent_msg.media:
+                self.sent_tracks[chat_id].add(track_id)
             
         except Exception as e:
             await call.answer(f"Ошибка: {str(e)}", show_alert=True)
@@ -650,9 +722,9 @@ class InsMusic(loader.Module):
         self.emojis_enabled = not current
         
         if self.emojis_enabled:
-            await message.edit(f"{self.clock_emoji()} <b>Эмодзи включены</b>")
+            await message.edit(f"{self.clock_emoji()} Эмодзи включены")
         else:
-            await message.edit(" <b>Эмодзи выключены</b>")
+            await message.edit("Эмодзи выключены")
 
     @loader.command(
         ru_doc="Добавляет текущий чат в список разрешенных для команды без префикса",
@@ -778,3 +850,24 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
+
+    @loader.command(
+        ru_doc="Очищает кеш отправленных треков в текущем чате",
+        en_doc="Clears sent tracks cache in current chat"
+    )
+    async def clearcachecmd(self, message):
+        """Очистить кеш отправленных треков"""
+        try:
+            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+        except Exception:
+            chat_id = str(message.peer_id)
+        
+        if chat_id.startswith('-100'):
+            chat_id = chat_id[4:]
+        
+        if chat_id in self.sent_tracks:
+            count = len(self.sent_tracks[chat_id])
+            self.sent_tracks[chat_id].clear()
+            await message.edit(f"Кеш очищен! Удалено {count} записей.")
+        else:
+            await message.edit("Кеш для этого чата пуст.")
