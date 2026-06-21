@@ -475,7 +475,7 @@ class InsMusic(loader.Module):
             await message.client.send_file(
                 message.to_id,
                 music_document,
-                reply_to=message.id  
+                reply_to=message.id
             )
 
         except Exception as error:
