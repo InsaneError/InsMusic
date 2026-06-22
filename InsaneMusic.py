@@ -60,7 +60,7 @@ class InsMusic(loader.Module):
         """Возвращает эмодзи часов или текст в зависимости от настройки"""
         if self.emojis_enabled:
             return "<emoji document_id=5330324623613533041>⏰</emoji>"
-        return "<emoji document_id=5330324623613533041>⏰</emoji>"
+        return ""
 
     def check_spam(self, user_id):
         """Проверка на спам"""
@@ -415,19 +415,25 @@ class InsMusic(loader.Module):
 
     async def _execute_search_and_send(self, message, search_query):
         """Общая логика поиска и отправки музыки"""
+        searching_message = None
         try:
             await message.delete()
-            searching_message = await message.respond(self.clock_emoji())
+            
+            # Отправляем эмодзи только если они включены
+            if self.emojis_enabled:
+                searching_message = await message.respond(self.clock_emoji())
 
             music_document = await self.search_music(search_query, message, searching_message)
 
+            # Удаляем эмодзи если оно было отправлено
+            if searching_message:
+                await searching_message.delete()
+
             if not music_document:
-                await searching_message.edit("Музыка не найдена")
-                await self.delete_after(searching_message, 3)
+                error_message = await message.respond("Музыка не найдена")
+                await self.delete_after(error_message, 3)
                 return
 
-            await searching_message.delete()
-            
             sent_msg = await self._send_with_reply(
                 message.to_id,
                 music_document,
@@ -444,6 +450,12 @@ class InsMusic(loader.Module):
 
         except Exception as error:
             await message.delete()
+            # Если произошла ошибка, удаляем эмодзи если оно было
+            if searching_message:
+                try:
+                    await searching_message.delete()
+                except:
+                    pass
             error_message = await message.respond(f"Ошибка: {str(error)}")
             await self.delete_after(error_message, 3)
 
@@ -484,7 +496,11 @@ class InsMusic(loader.Module):
             return
         
         await message.delete()
-        emoji_message = await message.respond(self.clock_emoji())
+        
+        # Отправляем эмодзи только если они включены
+        emoji_message = None
+        if self.emojis_enabled:
+            emoji_message = await message.respond(self.clock_emoji())
         
         try:
             await self.inline.form(
@@ -493,9 +509,13 @@ class InsMusic(loader.Module):
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
             )
-            await emoji_message.delete()
+            # Удаляем эмодзи если оно было отправлено
+            if emoji_message:
+                await emoji_message.delete()
         except Exception as e:
-            await emoji_message.delete()
+            # Удаляем эмодзи если оно было отправлено
+            if emoji_message:
+                await emoji_message.delete()
             await utils.answer(message, f"Ошибка: {str(e)}")
 
     async def _build_music_buttons(self, query: str, message: Message):
@@ -533,7 +553,12 @@ class InsMusic(loader.Module):
     async def _send_music_callback(self, call, document, original_message):
         """Callback для отправки выбранной музыки"""
         try:
-            await call.answer(self.clock_emoji())
+            # Отправляем ответ с эмодзи только если они включены
+            if self.emojis_enabled:
+                await call.answer(self.clock_emoji())
+            else:
+                await call.answer()
+            
             await call.delete()
             
             track_id = self._get_track_id(document)
@@ -594,9 +619,13 @@ class InsMusic(loader.Module):
             
             search_query = message.text[8:]
             
+            emoji_message = None
             try:
                 await message.delete()
-                emoji_message = await message.respond(self.clock_emoji())
+                
+                # Отправляем эмодзи только если они включены
+                if self.emojis_enabled:
+                    emoji_message = await message.respond(self.clock_emoji())
                 
                 await self.inline.form(
                     text="Выберите трек:",
@@ -604,12 +633,16 @@ class InsMusic(loader.Module):
                     reply_markup=await self._build_music_buttons(search_query, message),
                     silent=True
                 )
-                await emoji_message.delete()
-            except Exception as e:
-                try:
+                # Удаляем эмодзи если оно было отправлено
+                if emoji_message:
                     await emoji_message.delete()
-                except:
-                    pass
+            except Exception as e:
+                # Удаляем эмодзи если оно было отправлено
+                if emoji_message:
+                    try:
+                        await emoji_message.delete()
+                    except:
+                        pass
                 error_message = await message.respond(f"Ошибка: {str(e)}")
                 await self.delete_after(error_message, 3)
 
