@@ -14,7 +14,7 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
-        self.bot = "WersModule_Musicbot"
+        self.bot = ""
         self.cache = {}
         self.sent_tracks = {}  # {chat_id: set(track_ids)}
         super().__init__()
