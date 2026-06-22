@@ -2,7 +2,10 @@ from .. import loader, utils
 import asyncio
 import time
 import re
+import logging
 from telethon.tl.types import Message
+
+logger = logging.getLogger(__name__)
 
 
 class InsMusic(loader.Module):
@@ -11,12 +14,29 @@ class InsMusic(loader.Module):
     strings = {'name': 'InsMusic'}
 
     def __init__(self):
-        self.database = None
-        self.search_lock = asyncio.Lock()
-        self.spam_protection = {}
-        self.cache = {}
-        self.sent_tracks = {}  # {chat_id: set(track_ids)}
-        super().__init__()
+        try:
+            self.database = None
+            self.client = None
+            self.search_lock = asyncio.Lock()
+            self.spam_protection = {}
+            self.cache = {}
+            self.sent_tracks = {}  # {chat_id: set(track_ids)}
+            self._cleanup_task = None
+            super().__init__()
+        except Exception as e:
+            logger.error(f"Ошибка инициализации InsMusic: {e}")
+
+    async def on_dlmod(self):
+        """Вызывается при загрузке модуля"""
+        pass
+
+    async def on_unload(self):
+        """Вызывается при выгрузке модуля"""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+        self.sent_tracks.clear()
+        self.cache.clear()
+        self.spam_protection.clear()
 
     async def client_ready(self, client, database):
         self.client = client
@@ -31,6 +51,30 @@ class InsMusic(loader.Module):
 
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
+        
+        # Запускаем периодическую очистку кеша
+        if not self._cleanup_task:
+            self._cleanup_task = asyncio.ensure_future(self._cleanup_sent_tracks())
+
+    async def _cleanup_sent_tracks(self):
+        """Периодическая очистка кеша отправленных треков"""
+        while True:
+            try:
+                await asyncio.sleep(3600)  # Каждый час
+                for chat_id in list(self.sent_tracks.keys()):
+                    if len(self.sent_tracks[chat_id]) > 100:
+                        # Оставляем только последние 100 треков
+                        self.sent_tracks[chat_id] = set(list(self.sent_tracks[chat_id])[-100:])
+                
+                # Очищаем кеш для чатов, которых нет в списке allowed_chats
+                allowed = set(self.allowed_chats)
+                for chat_id in list(self.sent_tracks.keys()):
+                    if chat_id not in allowed:
+                        del self.sent_tracks[chat_id]
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Ошибка в _cleanup_sent_tracks: {e}")
 
     @property
     def allowed_chats(self):
@@ -64,6 +108,8 @@ class InsMusic(loader.Module):
 
     def check_spam(self, user_id):
         """Проверка на спам"""
+        if not user_id:
+            return True  # Разрешаем, если нет user_id (анонимный админ)
         current_time = time.time()
         if user_id in self.spam_protection:
             last_time = self.spam_protection[user_id]
@@ -72,8 +118,30 @@ class InsMusic(loader.Module):
         self.spam_protection[user_id] = current_time
         return True
 
+    def _get_chat_id(self, message):
+        """Безопасное получение chat_id"""
+        try:
+            chat_id = str(message.chat_id)
+            if chat_id.startswith('-100'):
+                chat_id = chat_id[4:]
+            elif chat_id.startswith('-'):
+                chat_id = chat_id[1:]
+            return chat_id
+        except Exception:
+            try:
+                chat_id = str(message.peer_id)
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                elif chat_id.startswith('-'):
+                    chat_id = chat_id[1:]
+                return chat_id
+            except Exception:
+                return str(message.to_id)
+
     def _get_track_id(self, document):
         """Генерирует уникальный ID для трека на основе его атрибутов"""
+        if not document:
+            return str(time.time())
         try:
             if hasattr(document, 'id'):
                 return str(document.id)
@@ -100,14 +168,24 @@ class InsMusic(loader.Module):
     async def _send_with_reply(self, to_id, file, reply_to_msg):
         """Отправляет файл с учетом темы"""
         try:
+            # Проверяем, является ли сообщение из темы
+            if hasattr(reply_to_msg, 'reply_to') and reply_to_msg.reply_to:
+                if hasattr(reply_to_msg.reply_to, 'forum_topic') and reply_to_msg.reply_to.forum_topic:
+                    return await self.client.send_file(
+                        to_id,
+                        file,
+                        reply_to=reply_to_msg.id,
+                        topic=reply_to_msg.reply_to.reply_to_msg_id
+                    )
+            
             return await self.client.send_file(
                 to_id,
                 file,
                 reply_to=reply_to_msg.id
             )
         except Exception as e:
-            if "TOPIC_CLOSED" in str(e):
-                # Если тема закрыта, отправляем без reply_to
+            if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
+                # Если тема закрыта или удалена, отправляем без reply_to
                 return await self.client.send_file(
                     to_id,
                     file
@@ -122,12 +200,12 @@ class InsMusic(loader.Module):
                 timeout=3.0
             )
             
-            if not results or len(results) == 0:
+            if not results or not hasattr(results, '__iter__'):
                 return []
             
             music_results = []
             
-            for i in range(min(len(results), 7)):
+            for i in range(min(len(results), 10)):
                 result = results[i]
                 if hasattr(result.result, 'document') and result.result.document:
                     try:
@@ -135,11 +213,12 @@ class InsMusic(loader.Module):
                         title = ""
                         performer = ""
                         
-                        for attr in doc.attributes:
-                            if hasattr(attr, 'title'):
-                                title = attr.title
-                            if hasattr(attr, 'performer'):
-                                performer = attr.performer
+                        if hasattr(doc, 'attributes'):
+                            for attr in doc.attributes:
+                                if hasattr(attr, 'title'):
+                                    title = attr.title
+                                if hasattr(attr, 'performer'):
+                                    performer = attr.performer
                         
                         if not title and hasattr(result.result, 'title'):
                             title = result.result.title
@@ -153,22 +232,30 @@ class InsMusic(loader.Module):
                             'result_id': i,  
                             'original_result': result  
                         })
-                    except Exception:
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки результата от {bot_username}: {e}")
                         continue
             
             return music_results
             
-        except (asyncio.TimeoutError, Exception):
+        except (asyncio.TimeoutError, Exception) as e:
+            if not isinstance(e, asyncio.TimeoutError):
+                logger.error(f"Ошибка поиска в боте {bot_username}: {e}")
             return []
 
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
+        if not query:
+            return ""
         query = re.sub(r'[^\w\s-]', ' ', query)
         query = re.sub(r'\s+', ' ', query).strip()
         return query
 
     def calculate_relevance_score(self, track_info, original_query):
-        """Улучшенный расчет релевантности трека"""
+        """Улучшенный расчет релевантности трека с приоритетом на название"""
+        if not original_query or not track_info:
+            return 0
+            
         score = 0
         query_lower = original_query.lower()
         query_words = set(query_lower.split())
@@ -177,55 +264,92 @@ class InsMusic(loader.Module):
         performer_lower = track_info.get('performer', '').lower()
         raw_title_lower = track_info.get('raw_title', '').lower()
         
-        if query_lower == title_lower or query_lower == performer_lower:
+        # Точное совпадение с названием или исполнителем - максимальный приоритет
+        if query_lower == title_lower:
+            score += 150
+        if query_lower == performer_lower:
             score += 100
         
-        if query_lower in title_lower or query_lower in performer_lower:
-            score += 50
+        # Запрос полностью содержится в названии
+        if query_lower in title_lower:
+            score += 60
+        if query_lower in performer_lower:
+            score += 40
+        
+        # Запрос полностью содержится в сыром названии
         if query_lower in raw_title_lower:
             score += 30
         
-        matched_words = set()
+        # Проверка каждого слова из запроса
+        matched_title_words = 0
+        matched_performer_words = 0
+        total_words = len(query_words)
+        
         for word in query_words:
-            if len(word) < 3:
+            if len(word) < 2:
                 continue
-                
+            
+            # Поиск в названии
             if word in title_lower:
-                score += 15
-                matched_words.add(word)
+                matched_title_words += 1
+                # Бонус за короткие слова (часто это ключевые слова)
+                if len(word) <= 3:
+                    score += 15
+                else:
+                    score += 10
             
+            # Поиск в исполнителе
             if word in performer_lower:
-                score += 20
-                matched_words.add(word)
+                matched_performer_words += 1
+                score += 8
             
+            # Поиск в сыром названии
             if word in raw_title_lower:
-                score += 10
-                matched_words.add(word)
+                score += 5
         
-        significant_words = [w for w in query_words if len(w) >= 3]
-        if significant_words and len(matched_words) == len(significant_words):
-            score += 25
+        # Бонус, если все слова найдены в названии
+        if total_words > 0 and matched_title_words == total_words:
+            score += 30
         
+        # Бонус, если все слова найдены в исполнителе
+        if total_words > 0 and matched_performer_words == total_words:
+            score += 20
+        
+        # Бонус за частичное совпадение с названием (для длинных запросов)
+        if len(query_words) >= 2:
+            title_parts = set(title_lower.split())
+            performer_parts = set(performer_lower.split())
+            
+            # Проверка вхождения частей названия
+            for part in title_parts:
+                if len(part) >= 3 and part in query_lower:
+                    score += 8
+            
+            # Проверка вхождения частей исполнителя
+            for part in performer_parts:
+                if len(part) >= 3 and part in query_lower:
+                    score += 5
+        
+        # Бонус за наличие и исполнителя, и названия
         if performer_lower and title_lower:
-            score += 10
-        
-        title_parts = set(title_lower.split())
-        extra_words = title_parts - query_words
-        if extra_words and len(extra_words) > len(title_parts) / 2:
-            score -= len(extra_words) * 5
+            score += 5
         
         return score
 
     def extract_track_info_from_document(self, document, raw_title=""):
         """Извлекает информацию о треке из документа"""
+        if not document:
+            return {'title': '', 'performer': '', 'raw_title': raw_title}
+            
         title = ""
         performer = ""
         
-        for attr in document.attributes:
-            if hasattr(attr, 'title'):
-                title = attr.title
-            if hasattr(attr, 'performer'):
-                performer = attr.performer
+        if hasattr(document, 'attributes'):
+            for attr in document.attributes:
+                if hasattr(attr, 'title'):
+                    title = attr.title
+                if hasattr(attr, 'performer'):
+                    performer = attr.performer
         
         if not title and hasattr(document, 'name') and document.name:
             filename = document.name.lower()
@@ -244,72 +368,84 @@ class InsMusic(loader.Module):
         }
 
     async def search_music_all_bots(self, query, message):
-        """Улучшенный поиск по всем ботам с получением первого найденного релевантного результата"""
+        """Улучшенный поиск по всем ботам с приоритетом названия"""
+        if not query:
+            return None
+            
         cleaned_query = self.clean_query(query)
         
+        # Пробуем разные варианты запроса для лучшего поиска
+        search_variations = [
+            cleaned_query,  # Оригинальный запрос
+            cleaned_query.lower(),  # В нижнем регистре
+        ]
+        
+        # Если в запросе больше одного слова, пробуем без последнего слова (может быть лишним)
+        if len(cleaned_query.split()) > 2:
+            words = cleaned_query.split()
+            search_variations.append(' '.join(words[:-1]))
+        
         inline_bots = self.music_bots.copy()
-        
-        search_tasks = []
-        for bot_username in inline_bots:
-            task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
-            search_tasks.append(task)
-        
-        start_time = time.time()
-        timeout = 10.0
-        
         all_results = []
         
-        while time.time() - start_time < timeout:
-            completed = [t for t in search_tasks if t.done()]
-            
-            for task in completed:
-                if task not in search_tasks:
-                    continue
-                    
-                try:
-                    results = task.result()
-                    if isinstance(results, list) and results:
-                        all_results.extend(results)
-                        
-                        scored_results = []
-                        for result in results:
-                            if not result or not result.get('document'):
-                                continue
-                            
-                            track_info = self.extract_track_info_from_document(
-                                result['document'], 
-                                result.get('raw_title', '')
-                            )
-                            
-                            track_info.update({
-                                'bot': result.get('bot', ''),
-                                'document': result['document'],
-                                'result_id': result.get('result_id', 0),
-                                'original_result': result.get('original_result')
-                            })
-                            
-                            score = self.calculate_relevance_score(track_info, cleaned_query)
-                            scored_results.append((score, track_info))
-                        
-                        if scored_results:
-                            scored_results.sort(key=lambda x: x[0], reverse=True)
-                            best_score, best_result = scored_results[0]
-                            
-                            if best_score >= 25:
-                                return best_result['document']
-                    
-                except Exception:
-                    pass
+        for search_query in search_variations:
+            if not search_query:
+                continue
                 
-                if task in search_tasks:
+            search_tasks = []
+            for bot_username in inline_bots:
+                task = asyncio.create_task(self.search_in_bot(bot_username, search_query, message))
+                search_tasks.append(task)
+            
+            start_time = time.time()
+            timeout = 8.0
+            
+            while time.time() - start_time < timeout and search_tasks:
+                completed = [t for t in search_tasks if t.done()]
+                
+                for task in completed:
                     search_tasks.remove(task)
-            
-            if not search_tasks and not all_results:
-                break
-            
-            if search_tasks:
-                await asyncio.sleep(0.3)
+                        
+                    try:
+                        results = task.result()
+                        if isinstance(results, list) and results:
+                            all_results.extend(results)
+                            
+                            scored_results = []
+                            for result in results:
+                                if not result or not result.get('document'):
+                                    continue
+                                
+                                track_info = self.extract_track_info_from_document(
+                                    result['document'], 
+                                    result.get('raw_title', '')
+                                )
+                                
+                                track_info.update({
+                                    'bot': result.get('bot', ''),
+                                    'document': result['document'],
+                                    'result_id': result.get('result_id', 0),
+                                    'original_result': result.get('original_result')
+                                })
+                                
+                                score = self.calculate_relevance_score(track_info, cleaned_query)
+                                scored_results.append((score, track_info))
+                            
+                            if scored_results:
+                                scored_results.sort(key=lambda x: x[0], reverse=True)
+                                best_score, best_result = scored_results[0]
+                                
+                                # Снижаем порог для лучшего поиска
+                                if best_score >= 20:
+                                    return best_result['document']
+                        
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки результатов: {e}")
+                
+                if search_tasks:
+                    await asyncio.sleep(0.2)
         
+        # Если ничего не нашли с вариациями, пробуем оригинальный запрос со всеми результатами
         if all_results:
             all_scored_results = []
             for result in all_results:
@@ -339,19 +475,24 @@ class InsMusic(loader.Module):
             if all_scored_results:
                 all_scored_results.sort(key=lambda x: x[0], reverse=True)
                 best_score, best_result = all_scored_results[0]
-                if best_score >= 15:
+                if best_score >= 10:  # Сниженный порог
                     return best_result['document']
         
         return None
 
     async def search_music(self, query, message, status_msg=None):
         """Основной метод поиска"""
+        if not query:
+            return None
         async with self.search_lock:
             result = await self.search_music_all_bots(query, message)
             return result
 
     async def search_music_inline(self, query, message, offset=0):
         """Поиск музыки для инлайн-режима с возвратом нескольких результатов (только Lybot)"""
+        if not query:
+            return []
+            
         cleaned_query = self.clean_query(query)
         
         bot_username = "lybot"
@@ -387,7 +528,7 @@ class InsMusic(loader.Module):
             
             scored_results.sort(key=lambda x: x[0], reverse=True)
             
-            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+            chat_id = self._get_chat_id(message)
             sent_in_chat = self.sent_tracks.get(chat_id, set())
             
             unique_results = []
@@ -410,14 +551,21 @@ class InsMusic(loader.Module):
             return unique_results
             
         except Exception as e:
-            print(f"Ошибка при поиске в Lybot: {e}")
+            logger.error(f"Ошибка при поиске в Lybot: {e}")
             return []
 
     async def _execute_search_and_send(self, message, search_query):
         """Общая логика поиска и отправки музыки"""
+        if not search_query:
+            return
+            
         searching_message = None
         try:
-            await message.delete()
+            # Безопасное удаление сообщения
+            try:
+                await message.delete()
+            except Exception:
+                pass
             
             # Отправляем эмодзи только если они включены
             if self.emojis_enabled:
@@ -427,7 +575,10 @@ class InsMusic(loader.Module):
 
             # Удаляем эмодзи если оно было отправлено
             if searching_message:
-                await searching_message.delete()
+                try:
+                    await searching_message.delete()
+                except Exception:
+                    pass
 
             if not music_document:
                 error_message = await message.respond("Музыка не найдена")
@@ -442,19 +593,24 @@ class InsMusic(loader.Module):
             
             if sent_msg and sent_msg.media:
                 track_id = self._get_track_id(music_document)
-                chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
+                chat_id = self._get_chat_id(message)
                 
                 if chat_id not in self.sent_tracks:
                     self.sent_tracks[chat_id] = set()
                 self.sent_tracks[chat_id].add(track_id)
 
         except Exception as error:
-            await message.delete()
+            logger.error(f"Ошибка в _execute_search_and_send: {error}")
+            # Безопасное удаление сообщения
+            try:
+                await message.delete()
+            except Exception:
+                pass
             # Если произошла ошибка, удаляем эмодзи если оно было
             if searching_message:
                 try:
                     await searching_message.delete()
-                except:
+                except Exception:
                     pass
             error_message = await message.respond(f"Ошибка: {str(error)}")
             await self.delete_after(error_message, 3)
@@ -468,7 +624,10 @@ class InsMusic(loader.Module):
         
         user_id = message.sender_id
         if not self.check_spam(user_id):
-            await message.delete()
+            try:
+                await message.delete()
+            except Exception:
+                pass
             error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
             await self.delete_after(error_message, 3)
             return
@@ -476,7 +635,10 @@ class InsMusic(loader.Module):
         search_query = utils.get_args_raw(message)
 
         if not search_query:
-            await message.delete()
+            try:
+                await message.delete()
+            except Exception:
+                pass
             error_message = await message.respond("Укажите название песни!")
             await self.delete_after(error_message, 3)
             return
@@ -495,7 +657,10 @@ class InsMusic(loader.Module):
             await utils.answer(message, "Укажите название песни для поиска!")
             return
         
-        await message.delete()
+        try:
+            await message.delete()
+        except Exception:
+            pass
         
         # Отправляем эмодзи только если они включены
         emoji_message = None
@@ -509,17 +674,21 @@ class InsMusic(loader.Module):
                 reply_markup=await self._build_music_buttons(args, message),
                 silent=True
             )
-            # Удаляем эмодзи если оно было отправлено
-            if emoji_message:
-                await emoji_message.delete()
         except Exception as e:
+            logger.error(f"Ошибка в миcmd: {e}")
+            await utils.answer(message, f"Ошибка: {str(e)}")
+        finally:
             # Удаляем эмодзи если оно было отправлено
             if emoji_message:
-                await emoji_message.delete()
-            await utils.answer(message, f"Ошибка: {str(e)}")
+                try:
+                    await emoji_message.delete()
+                except Exception:
+                    pass
 
     async def _build_music_buttons(self, query: str, message: Message):
         """Создает кнопки с результатами поиска"""
+        if not query:
+            return [[{"text": "Пустой запрос", "action": "close"}]]
         
         results = await self.search_music_inline(query, message)
         
@@ -559,10 +728,13 @@ class InsMusic(loader.Module):
             else:
                 await call.answer()
             
-            await call.delete()
+            try:
+                await call.delete()
+            except Exception:
+                pass
             
             track_id = self._get_track_id(document)
-            chat_id = str(original_message.chat_id if hasattr(original_message, 'chat_id') else original_message.to_id)
+            chat_id = self._get_chat_id(original_message)
             
             if chat_id not in self.sent_tracks:
                 self.sent_tracks[chat_id] = set()
@@ -581,47 +753,57 @@ class InsMusic(loader.Module):
                 self.sent_tracks[chat_id].add(track_id)
             
         except Exception as e:
+            logger.error(f"Ошибка в _send_music_callback: {e}")
             await call.answer(f"Ошибка: {str(e)}", show_alert=True)
 
     async def watcher(self, message):
-        if not message.text:
+        """Наблюдатель за сообщениями"""
+        if not message or not message.text or len(message.text) < 6:
+            return
+        
+        # Проверяем, что отправитель существует
+        if not hasattr(message, 'sender_id') or not message.sender_id:
             return
 
-        try:
-            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-        except Exception:
-            chat_id = str(message.peer_id)
-        
-        if chat_id.startswith('-100'):
-            chat_id = chat_id[4:]
+        chat_id = self._get_chat_id(message)
         
         if chat_id not in self.allowed_chats:
-            original_chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-            if original_chat_id not in self.allowed_chats:
-                return
+            return
 
         text_lower = message.text.lower()
         
         if text_lower.startswith("найти "):
             user_id = message.sender_id
             if not self.check_spam(user_id):
-                await message.delete()
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
                 return
             
             search_query = message.text[6:]
-            await self._execute_search_and_send(message, search_query)
+            if search_query:
+                await self._execute_search_and_send(message, search_query)
         
         elif text_lower.startswith("найтими "):
             user_id = message.sender_id
             if not self.check_spam(user_id):
-                await message.delete()
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
                 return
             
             search_query = message.text[8:]
+            if not search_query:
+                return
             
             emoji_message = None
             try:
-                await message.delete()
+                try:
+                    await message.delete()
+                except Exception:
+                    pass
                 
                 # Отправляем эмодзи только если они включены
                 if self.emojis_enabled:
@@ -633,28 +815,31 @@ class InsMusic(loader.Module):
                     reply_markup=await self._build_music_buttons(search_query, message),
                     silent=True
                 )
-                # Удаляем эмодзи если оно было отправлено
-                if emoji_message:
-                    await emoji_message.delete()
             except Exception as e:
+                logger.error(f"Ошибка в watcher найтими: {e}")
+                error_message = await message.respond(f"Ошибка: {str(e)}")
+                await self.delete_after(error_message, 3)
+            finally:
                 # Удаляем эмодзи если оно было отправлено
                 if emoji_message:
                     try:
                         await emoji_message.delete()
-                    except:
+                    except Exception:
                         pass
-                error_message = await message.respond(f"Ошибка: {str(e)}")
-                await self.delete_after(error_message, 3)
 
     async def delete_after(self, message, seconds):
-        await asyncio.sleep(seconds)
-        await message.delete()
+        """Удаляет сообщение через указанное количество секунд"""
+        try:
+            await asyncio.sleep(seconds)
+            await message.delete()
+        except Exception:
+            pass
 
     @loader.command(
         ru_doc="Включает/выключает эмодзи в сообщениях модуля",
         en_doc="Toggles emojis in module messages on/off"
     )
-    async def togglemcmd(self, message):
+    async def котмcmd(self, message):
         """Вкл/Выкл эмодзи"""
         current = self.emojis_enabled
         self.emojis_enabled = not current
@@ -670,13 +855,7 @@ class InsMusic(loader.Module):
     )
     async def addmcmd(self, message):
         """Добавить чат для работы без префикса"""
-        try:
-            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-        except Exception:
-            chat_id = str(message.peer_id)
-            
-        if chat_id.startswith('-100'):
-            chat_id = chat_id[4:]
+        chat_id = self._get_chat_id(message)
             
         current_allowed_chats = self.allowed_chats.copy()
 
@@ -698,13 +877,7 @@ class InsMusic(loader.Module):
         if args:
             chat_id = args
         else:
-            try:
-                chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-            except Exception:
-                chat_id = str(message.peer_id)
-            
-            if chat_id.startswith('-100'):
-                chat_id = chat_id[4:]
+            chat_id = self._get_chat_id(message)
             
         current_allowed_chats = self.allowed_chats.copy()
 
@@ -728,7 +901,7 @@ class InsMusic(loader.Module):
             text = "Разрешенные чаты:\n\n"
             for chat_id in allowed_chats_list:
                 try:
-                    if chat_id.isdigit():
+                    if chat_id.lstrip('-').isdigit():
                         chat = await self.client.get_entity(int(chat_id))
                         title = getattr(chat, 'title', 'Личные сообщения')
                         text += f"• {title} ({chat_id})\n"
@@ -744,9 +917,14 @@ class InsMusic(loader.Module):
     )
     async def botsmcmd(self, message):
         """Список ботов для поиска"""
+        bots = self.music_bots
+        if not bots:
+            await message.edit("Список ботов пуст!")
+            return
+            
         text = "Боты для поиска музыки:\n\n"
-        for i, bot in enumerate(self.music_bots, 1):
-            text += f"{i}. {bot}\n"
+        for i, bot in enumerate(bots, 1):
+            text += f"{i}. @{bot}\n"
         await message.edit(text)
 
     @loader.command(
@@ -760,7 +938,11 @@ class InsMusic(loader.Module):
             await message.edit("Укажите username бота!")
             return
         
-        bot_username = args.replace('@', '')
+        bot_username = args.replace('@', '').strip()
+        if not bot_username:
+            await message.edit("Некорректный username бота!")
+            return
+            
         if bot_username in self.music_bots:
             await message.edit("Этот бот уже есть в списке!")
         else:
@@ -780,7 +962,7 @@ class InsMusic(loader.Module):
             await message.edit("Укажите username бота!")
             return
         
-        bot_username = args.replace('@', '')
+        bot_username = args.replace('@', '').strip()
         if bot_username in self.music_bots:
             current_bots_list = self.music_bots.copy()
             current_bots_list.remove(bot_username)
@@ -793,15 +975,9 @@ class InsMusic(loader.Module):
         ru_doc="Очищает кеш отправленных треков в текущем чате",
         en_doc="Clears sent tracks cache in current chat"
     )
-    async def clearcachecmd(self, message):
+    async def кешмcmd(self, message):
         """Очистить кеш отправленных треков"""
-        try:
-            chat_id = str(message.chat_id if hasattr(message, 'chat_id') else message.to_id)
-        except Exception:
-            chat_id = str(message.peer_id)
-        
-        if chat_id.startswith('-100'):
-            chat_id = chat_id[4:]
+        chat_id = self._get_chat_id(message)
         
         if chat_id in self.sent_tracks:
             count = len(self.sent_tracks[chat_id])
