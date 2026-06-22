@@ -21,7 +21,6 @@ class InsMusic(loader.Module):
             self.spam_protection = {}
             self.cache = {}
             self.sent_tracks = {}  # {chat_id: set(track_ids)}
-            self._cleanup_task = None
             super().__init__()
         except Exception as e:
             logger.error(f"Ошибка инициализации InsMusic: {e}")
@@ -32,8 +31,6 @@ class InsMusic(loader.Module):
 
     async def on_unload(self):
         """Вызывается при выгрузке модуля"""
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
         self.sent_tracks.clear()
         self.cache.clear()
         self.spam_protection.clear()
@@ -51,30 +48,6 @@ class InsMusic(loader.Module):
 
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
-        
-        # Запускаем периодическую очистку кеша
-        if not self._cleanup_task:
-            self._cleanup_task = asyncio.ensure_future(self._cleanup_sent_tracks())
-
-    async def _cleanup_sent_tracks(self):
-        """Периодическая очистка кеша отправленных треков"""
-        while True:
-            try:
-                await asyncio.sleep(3600)  # Каждый час
-                for chat_id in list(self.sent_tracks.keys()):
-                    if len(self.sent_tracks[chat_id]) > 100:
-                        # Оставляем только последние 100 треков
-                        self.sent_tracks[chat_id] = set(list(self.sent_tracks[chat_id])[-100:])
-                
-                # Очищаем кеш для чатов, которых нет в списке allowed_chats
-                allowed = set(self.allowed_chats)
-                for chat_id in list(self.sent_tracks.keys()):
-                    if chat_id not in allowed:
-                        del self.sent_tracks[chat_id]
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Ошибка в _cleanup_sent_tracks: {e}")
 
     @property
     def allowed_chats(self):
@@ -109,7 +82,7 @@ class InsMusic(loader.Module):
     def check_spam(self, user_id):
         """Проверка на спам"""
         if not user_id:
-            return True  # Разрешаем, если нет user_id (анонимный админ)
+            return True
         current_time = time.time()
         if user_id in self.spam_protection:
             last_time = self.spam_protection[user_id]
@@ -168,7 +141,6 @@ class InsMusic(loader.Module):
     async def _send_with_reply(self, to_id, file, reply_to_msg):
         """Отправляет файл с учетом темы"""
         try:
-            # Проверяем, является ли сообщение из темы
             if hasattr(reply_to_msg, 'reply_to') and reply_to_msg.reply_to:
                 if hasattr(reply_to_msg.reply_to, 'forum_topic') and reply_to_msg.reply_to.forum_topic:
                     return await self.client.send_file(
@@ -185,7 +157,6 @@ class InsMusic(loader.Module):
             )
         except Exception as e:
             if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
-                # Если тема закрыта или удалена, отправляем без reply_to
                 return await self.client.send_file(
                     to_id,
                     file
@@ -264,23 +235,19 @@ class InsMusic(loader.Module):
         performer_lower = track_info.get('performer', '').lower()
         raw_title_lower = track_info.get('raw_title', '').lower()
         
-        # Точное совпадение с названием или исполнителем - максимальный приоритет
         if query_lower == title_lower:
             score += 150
         if query_lower == performer_lower:
             score += 100
         
-        # Запрос полностью содержится в названии
         if query_lower in title_lower:
             score += 60
         if query_lower in performer_lower:
             score += 40
         
-        # Запрос полностью содержится в сыром названии
         if query_lower in raw_title_lower:
             score += 30
         
-        # Проверка каждого слова из запроса
         matched_title_words = 0
         matched_performer_words = 0
         total_words = len(query_words)
@@ -289,48 +256,38 @@ class InsMusic(loader.Module):
             if len(word) < 2:
                 continue
             
-            # Поиск в названии
             if word in title_lower:
                 matched_title_words += 1
-                # Бонус за короткие слова (часто это ключевые слова)
                 if len(word) <= 3:
                     score += 15
                 else:
                     score += 10
             
-            # Поиск в исполнителе
             if word in performer_lower:
                 matched_performer_words += 1
                 score += 8
             
-            # Поиск в сыром названии
             if word in raw_title_lower:
                 score += 5
         
-        # Бонус, если все слова найдены в названии
         if total_words > 0 and matched_title_words == total_words:
             score += 30
         
-        # Бонус, если все слова найдены в исполнителе
         if total_words > 0 and matched_performer_words == total_words:
             score += 20
         
-        # Бонус за частичное совпадение с названием (для длинных запросов)
         if len(query_words) >= 2:
             title_parts = set(title_lower.split())
             performer_parts = set(performer_lower.split())
             
-            # Проверка вхождения частей названия
             for part in title_parts:
                 if len(part) >= 3 and part in query_lower:
                     score += 8
             
-            # Проверка вхождения частей исполнителя
             for part in performer_parts:
                 if len(part) >= 3 and part in query_lower:
                     score += 5
         
-        # Бонус за наличие и исполнителя, и названия
         if performer_lower and title_lower:
             score += 5
         
@@ -374,13 +331,11 @@ class InsMusic(loader.Module):
             
         cleaned_query = self.clean_query(query)
         
-        # Пробуем разные варианты запроса для лучшего поиска
         search_variations = [
-            cleaned_query,  # Оригинальный запрос
-            cleaned_query.lower(),  # В нижнем регистре
+            cleaned_query,
+            cleaned_query.lower(),
         ]
         
-        # Если в запросе больше одного слова, пробуем без последнего слова (может быть лишним)
         if len(cleaned_query.split()) > 2:
             words = cleaned_query.split()
             search_variations.append(' '.join(words[:-1]))
@@ -435,7 +390,6 @@ class InsMusic(loader.Module):
                                 scored_results.sort(key=lambda x: x[0], reverse=True)
                                 best_score, best_result = scored_results[0]
                                 
-                                # Снижаем порог для лучшего поиска
                                 if best_score >= 20:
                                     return best_result['document']
                         
@@ -445,7 +399,6 @@ class InsMusic(loader.Module):
                 if search_tasks:
                     await asyncio.sleep(0.2)
         
-        # Если ничего не нашли с вариациями, пробуем оригинальный запрос со всеми результатами
         if all_results:
             all_scored_results = []
             for result in all_results:
@@ -475,7 +428,7 @@ class InsMusic(loader.Module):
             if all_scored_results:
                 all_scored_results.sort(key=lambda x: x[0], reverse=True)
                 best_score, best_result = all_scored_results[0]
-                if best_score >= 10:  # Сниженный порог
+                if best_score >= 10:
                     return best_result['document']
         
         return None
@@ -528,18 +481,11 @@ class InsMusic(loader.Module):
             
             scored_results.sort(key=lambda x: x[0], reverse=True)
             
-            chat_id = self._get_chat_id(message)
-            sent_in_chat = self.sent_tracks.get(chat_id, set())
-            
             unique_results = []
             seen_documents = set()
             
             for score, track_info in scored_results:
                 doc_id = id(track_info['document'])
-                track_id = self._get_track_id(track_info['document'])
-                
-                if track_id in sent_in_chat:
-                    continue
                 
                 if doc_id not in seen_documents:
                     seen_documents.add(doc_id)
@@ -561,19 +507,16 @@ class InsMusic(loader.Module):
             
         searching_message = None
         try:
-            # Безопасное удаление сообщения
             try:
                 await message.delete()
             except Exception:
                 pass
             
-            # Отправляем эмодзи только если они включены
             if self.emojis_enabled:
                 searching_message = await message.respond(self.clock_emoji())
 
             music_document = await self.search_music(search_query, message, searching_message)
 
-            # Удаляем эмодзи если оно было отправлено
             if searching_message:
                 try:
                     await searching_message.delete()
@@ -601,12 +544,10 @@ class InsMusic(loader.Module):
 
         except Exception as error:
             logger.error(f"Ошибка в _execute_search_and_send: {error}")
-            # Безопасное удаление сообщения
             try:
                 await message.delete()
             except Exception:
                 pass
-            # Если произошла ошибка, удаляем эмодзи если оно было
             if searching_message:
                 try:
                     await searching_message.delete()
@@ -662,7 +603,6 @@ class InsMusic(loader.Module):
         except Exception:
             pass
         
-        # Отправляем эмодзи только если они включены
         emoji_message = None
         if self.emojis_enabled:
             emoji_message = await message.respond(self.clock_emoji())
@@ -678,7 +618,6 @@ class InsMusic(loader.Module):
             logger.error(f"Ошибка в миcmd: {e}")
             await utils.answer(message, f"Ошибка: {str(e)}")
         finally:
-            # Удаляем эмодзи если оно было отправлено
             if emoji_message:
                 try:
                     await emoji_message.delete()
@@ -722,7 +661,6 @@ class InsMusic(loader.Module):
     async def _send_music_callback(self, call, document, original_message):
         """Callback для отправки выбранной музыки"""
         try:
-            # Отправляем ответ с эмодзи только если они включены
             if self.emojis_enabled:
                 await call.answer(self.clock_emoji())
             else:
@@ -733,24 +671,11 @@ class InsMusic(loader.Module):
             except Exception:
                 pass
             
-            track_id = self._get_track_id(document)
-            chat_id = self._get_chat_id(original_message)
-            
-            if chat_id not in self.sent_tracks:
-                self.sent_tracks[chat_id] = set()
-            
-            if track_id in self.sent_tracks[chat_id]:
-                await call.answer("Этот трек уже был отправлен в чат!", show_alert=True)
-                return
-            
             sent_msg = await self._send_with_reply(
                 original_message.to_id,
                 document,
                 original_message
             )
-            
-            if sent_msg and sent_msg.media:
-                self.sent_tracks[chat_id].add(track_id)
             
         except Exception as e:
             logger.error(f"Ошибка в _send_music_callback: {e}")
@@ -761,7 +686,6 @@ class InsMusic(loader.Module):
         if not message or not message.text or len(message.text) < 6:
             return
         
-        # Проверяем, что отправитель существует
         if not hasattr(message, 'sender_id') or not message.sender_id:
             return
 
@@ -805,7 +729,6 @@ class InsMusic(loader.Module):
                 except Exception:
                     pass
                 
-                # Отправляем эмодзи только если они включены
                 if self.emojis_enabled:
                     emoji_message = await message.respond(self.clock_emoji())
                 
@@ -820,7 +743,6 @@ class InsMusic(loader.Module):
                 error_message = await message.respond(f"Ошибка: {str(e)}")
                 await self.delete_after(error_message, 3)
             finally:
-                # Удаляем эмодзи если оно было отправлено
                 if emoji_message:
                     try:
                         await emoji_message.delete()
@@ -970,18 +892,3 @@ class InsMusic(loader.Module):
             await message.edit(f"Бот @{bot_username} удален из списка!")
         else:
             await message.edit("Этот бот не найден в списке!")
-
-    @loader.command(
-        ru_doc="Очищает кеш отправленных треков в текущем чате",
-        en_doc="Clears sent tracks cache in current chat"
-    )
-    async def кешмcmd(self, message):
-        """Очистить кеш отправленных треков"""
-        chat_id = self._get_chat_id(message)
-        
-        if chat_id in self.sent_tracks:
-            count = len(self.sent_tracks[chat_id])
-            self.sent_tracks[chat_id].clear()
-            await message.edit(f"Кеш очищен! Удалено {count} записей.")
-        else:
-            await message.edit("Кеш для этого чата пуст.")
