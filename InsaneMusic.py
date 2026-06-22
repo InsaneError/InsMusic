@@ -20,7 +20,7 @@ class InsMusic(loader.Module):
             self.search_lock = asyncio.Lock()
             self.spam_protection = {}
             self.cache = {}
-            self.sent_tracks = {}  
+            self.sent_tracks = {}
             super().__init__()
         except Exception as e:
             logger.error(f"Ошибка инициализации InsMusic: {e}")
@@ -49,6 +49,55 @@ class InsMusic(loader.Module):
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
 
+    async def _safe_respond(self, message, text):
+        """Безопасная отправка ответа с обработкой TOPIC_CLOSED"""
+        try:
+            return await message.respond(text)
+        except Exception as e:
+            if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
+                try:
+                    return await self.client.send_message(message.to_id, text)
+                except Exception:
+                    pass
+            raise e
+
+    async def _safe_edit(self, message, text):
+        """Безопасное редактирование с обработкой TOPIC_CLOSED"""
+        try:
+            return await message.edit(text)
+        except Exception as e:
+            if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
+                try:
+                    await message.delete()
+                    return await self.client.send_message(message.to_id, text)
+                except Exception:
+                    pass
+            raise e
+
+    async def _safe_delete(self, message):
+        """Безопасное удаление сообщения"""
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+    async def _safe_send_file(self, to_id, file, reply_to=None):
+        """Безопасная отправка файла с обработкой TOPIC_CLOSED"""
+        try:
+            if reply_to:
+                try:
+                    return await self.client.send_file(to_id, file, reply_to=reply_to)
+                except Exception as e:
+                    if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
+                        return await self.client.send_file(to_id, file)
+                    raise e
+            else:
+                return await self.client.send_file(to_id, file)
+        except Exception as e:
+            if "TOPIC_CLOSED" not in str(e) and "TOPIC_DELETED" not in str(e):
+                raise e
+            return None
+
     @property
     def allowed_chats(self):
         return self.database.get("InsMusic", "allowed_chats", [])
@@ -74,6 +123,7 @@ class InsMusic(loader.Module):
         self.database.set("InsMusic", "emojis_enabled", value)
 
     def clock_emoji(self):
+        """Возвращает эмодзи часов или текст в зависимости от настройки"""
         if self.emojis_enabled:
             return "<emoji document_id=5330324623613533041>⏰</emoji>"
         return ""
@@ -91,6 +141,7 @@ class InsMusic(loader.Module):
         return True
 
     def _get_chat_id(self, message):
+        """Безопасное получение chat_id"""
         try:
             chat_id = str(message.chat_id)
             if chat_id.startswith('-100'):
@@ -110,6 +161,7 @@ class InsMusic(loader.Module):
                 return str(message.to_id)
 
     def _get_track_id(self, document):
+        """Генерирует уникальный ID для трека на основе его атрибутов"""
         if not document:
             return str(time.time())
         try:
@@ -147,17 +199,10 @@ class InsMusic(loader.Module):
                         topic=reply_to_msg.reply_to.reply_to_msg_id
                     )
             
-            return await self.client.send_file(
-                to_id,
-                file,
-                reply_to=reply_to_msg.id
-            )
+            return await self._safe_send_file(to_id, file, reply_to_msg.id)
         except Exception as e:
             if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
-                return await self.client.send_file(
-                    to_id,
-                    file
-                )
+                return await self._safe_send_file(to_id, file)
             raise e
 
     async def search_in_bot(self, bot_username, query, message):
@@ -504,53 +549,33 @@ class InsMusic(loader.Module):
             
         searching_message = None
         try:
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await self._safe_delete(message)
             
             if self.emojis_enabled:
-                searching_message = await message.respond(self.clock_emoji())
+                searching_message = await self._safe_respond(message, self.clock_emoji())
 
             music_document = await self.search_music(search_query, message, searching_message)
 
             if searching_message:
-                try:
-                    await searching_message.delete()
-                except Exception:
-                    pass
+                await self._safe_delete(searching_message)
 
             if not music_document:
-                error_message = await message.respond("Музыка не найдена")
+                error_message = await self._safe_respond(message, "Музыка не найдена")
                 await self.delete_after(error_message, 3)
                 return
 
-            sent_msg = await self._send_with_reply(
+            await self._send_with_reply(
                 message.to_id,
                 music_document,
                 message
             )
-            
-            if sent_msg and sent_msg.media:
-                track_id = self._get_track_id(music_document)
-                chat_id = self._get_chat_id(message)
-                
-                if chat_id not in self.sent_tracks:
-                    self.sent_tracks[chat_id] = set()
-                self.sent_tracks[chat_id].add(track_id)
 
         except Exception as error:
             logger.error(f"Ошибка в _execute_search_and_send: {error}")
-            try:
-                await message.delete()
-            except Exception:
-                pass
+            await self._safe_delete(message)
             if searching_message:
-                try:
-                    await searching_message.delete()
-                except Exception:
-                    pass
-            error_message = await message.respond(f"Ошибка: {str(error)}")
+                await self._safe_delete(searching_message)
+            error_message = await self._safe_respond(message, f"Ошибка: {str(error)}")
             await self.delete_after(error_message, 3)
 
     @loader.command(
@@ -562,22 +587,16 @@ class InsMusic(loader.Module):
         
         user_id = message.sender_id
         if not self.check_spam(user_id):
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            error_message = await message.respond("Слишком много запросов! Подождите 5 секунд.")
+            await self._safe_delete(message)
+            error_message = await self._safe_respond(message, "Слишком много запросов! Подождите 5 секунд.")
             await self.delete_after(error_message, 3)
             return
         
         search_query = utils.get_args_raw(message)
 
         if not search_query:
-            try:
-                await message.delete()
-            except Exception:
-                pass
-            error_message = await message.respond("Укажите название песни!")
+            await self._safe_delete(message)
+            error_message = await self._safe_respond(message, "Укажите название песни!")
             await self.delete_after(error_message, 3)
             return
 
@@ -595,14 +614,11 @@ class InsMusic(loader.Module):
             await utils.answer(message, "Укажите название песни для поиска!")
             return
         
-        try:
-            await message.delete()
-        except Exception:
-            pass
+        await self._safe_delete(message)
         
         emoji_message = None
         if self.emojis_enabled:
-            emoji_message = await message.respond(self.clock_emoji())
+            emoji_message = await self._safe_respond(message, self.clock_emoji())
         
         try:
             await self.inline.form(
@@ -616,10 +632,7 @@ class InsMusic(loader.Module):
             await utils.answer(message, f"Ошибка: {str(e)}")
         finally:
             if emoji_message:
-                try:
-                    await emoji_message.delete()
-                except Exception:
-                    pass
+                await self._safe_delete(emoji_message)
 
     async def _build_music_buttons(self, query: str, message: Message):
         """Создает кнопки с результатами поиска"""
@@ -663,12 +676,9 @@ class InsMusic(loader.Module):
             else:
                 await call.answer()
             
-            try:
-                await call.delete()
-            except Exception:
-                pass
+            await self._safe_delete(call)
             
-            sent_msg = await self._send_with_reply(
+            await self._send_with_reply(
                 original_message.to_id,
                 document,
                 original_message
@@ -696,10 +706,7 @@ class InsMusic(loader.Module):
         if text_lower.startswith("найти "):
             user_id = message.sender_id
             if not self.check_spam(user_id):
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+                await self._safe_delete(message)
                 return
             
             search_query = message.text[6:]
@@ -709,10 +716,7 @@ class InsMusic(loader.Module):
         elif text_lower.startswith("найтими "):
             user_id = message.sender_id
             if not self.check_spam(user_id):
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+                await self._safe_delete(message)
                 return
             
             search_query = message.text[8:]
@@ -721,13 +725,10 @@ class InsMusic(loader.Module):
             
             emoji_message = None
             try:
-                try:
-                    await message.delete()
-                except Exception:
-                    pass
+                await self._safe_delete(message)
                 
                 if self.emojis_enabled:
-                    emoji_message = await message.respond(self.clock_emoji())
+                    emoji_message = await self._safe_respond(message, self.clock_emoji())
                 
                 await self.inline.form(
                     text="Выберите трек:",
@@ -737,20 +738,17 @@ class InsMusic(loader.Module):
                 )
             except Exception as e:
                 logger.error(f"Ошибка в watcher найтими: {e}")
-                error_message = await message.respond(f"Ошибка: {str(e)}")
+                error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
                 await self.delete_after(error_message, 3)
             finally:
                 if emoji_message:
-                    try:
-                        await emoji_message.delete()
-                    except Exception:
-                        pass
+                    await self._safe_delete(emoji_message)
 
     async def delete_after(self, message, seconds):
         """Удаляет сообщение через указанное количество секунд"""
         try:
             await asyncio.sleep(seconds)
-            await message.delete()
+            await self._safe_delete(message)
         except Exception:
             pass
 
@@ -764,9 +762,9 @@ class InsMusic(loader.Module):
         self.emojis_enabled = not current
         
         if self.emojis_enabled:
-            await message.edit(f"{self.clock_emoji()} Эмодзи включены")
+            await self._safe_edit(message, f"{self.clock_emoji()} Эмодзи включены")
         else:
-            await message.edit("Эмодзи выключены")
+            await self._safe_edit(message, "Эмодзи выключены")
 
     @loader.command(
         ru_doc="Добавляет текущий чат в список разрешенных для команды без префикса",
@@ -779,11 +777,11 @@ class InsMusic(loader.Module):
         current_allowed_chats = self.allowed_chats.copy()
 
         if chat_id in current_allowed_chats:
-            await message.edit("Этот чат уже в списке разрешенных!")
+            await self._safe_edit(message, "Этот чат уже в списке разрешенных!")
         else:
             current_allowed_chats.append(chat_id)
             self.allowed_chats = current_allowed_chats
-            await message.edit(f"Чат добавлен! ID: {chat_id}")
+            await self._safe_edit(message, f"Чат добавлен! ID: {chat_id}")
 
     @loader.command(
         ru_doc="[id чата] - Удаляет текущий/указанный чат из списка разрешенных",
@@ -803,9 +801,9 @@ class InsMusic(loader.Module):
         if chat_id in current_allowed_chats:
             current_allowed_chats.remove(chat_id)
             self.allowed_chats = current_allowed_chats
-            await message.edit(f"Чат удален! ID: {chat_id}")
+            await self._safe_edit(message, f"Чат удален! ID: {chat_id}")
         else:
-            await message.edit("Этот чат не найден в списке.")
+            await self._safe_edit(message, "Этот чат не найден в списке.")
 
     @loader.command(
         ru_doc="Показывает список чатов, где команда работает без префикса",
@@ -815,7 +813,7 @@ class InsMusic(loader.Module):
         """Список разрешенных чатов"""
         allowed_chats_list = self.allowed_chats
         if not allowed_chats_list:
-            await message.edit("Список разрешенных чатов пуст.")
+            await self._safe_edit(message, "Список разрешенных чатов пуст.")
         else:
             text = "Разрешенные чаты:\n\n"
             for chat_id in allowed_chats_list:
@@ -828,7 +826,7 @@ class InsMusic(loader.Module):
                         text += f"• Неизвестный чат ({chat_id})\n"
                 except Exception:
                     text += f"• Неизвестный чат ({chat_id})\n"
-            await message.edit(text)
+            await self._safe_edit(message, text)
 
     @loader.command(
         ru_doc="Показывает список ботов для поиска музыки",
@@ -838,13 +836,13 @@ class InsMusic(loader.Module):
         """Список ботов для поиска"""
         bots = self.music_bots
         if not bots:
-            await message.edit("Список ботов пуст!")
+            await self._safe_edit(message, "Список ботов пуст!")
             return
             
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(bots, 1):
             text += f"{i}. @{bot}\n"
-        await message.edit(text)
+        await self._safe_edit(message, text)
 
     @loader.command(
         ru_doc="<юзернейм> - Добавляет бота в список для поиска музыки",
@@ -854,21 +852,21 @@ class InsMusic(loader.Module):
         """Добавить бота для поиска"""
         args = utils.get_args_raw(message)
         if not args:
-            await message.edit("Укажите username бота!")
+            await self._safe_edit(message, "Укажите username бота!")
             return
         
         bot_username = args.replace('@', '').strip()
         if not bot_username:
-            await message.edit("Некорректный username бота!")
+            await self._safe_edit(message, "Некорректный username бота!")
             return
             
         if bot_username in self.music_bots:
-            await message.edit("Этот бот уже есть в списке!")
+            await self._safe_edit(message, "Этот бот уже есть в списке!")
         else:
             current_bots_list = self.music_bots.copy()
             current_bots_list.append(bot_username)
             self.music_bots = current_bots_list
-            await message.edit(f"Бот @{bot_username} добавлен в список!")
+            await self._safe_edit(message, f"Бот @{bot_username} добавлен в список!")
 
     @loader.command(
         ru_doc="<юзернейм> - Удаляет бота из списка для поиска музыки",
@@ -878,7 +876,7 @@ class InsMusic(loader.Module):
         """Удалить бота из поиска"""
         args = utils.get_args_raw(message)
         if not args:
-            await message.edit("Укажите username бота!")
+            await self._safe_edit(message, "Укажите username бота!")
             return
         
         bot_username = args.replace('@', '').strip()
@@ -886,6 +884,6 @@ class InsMusic(loader.Module):
             current_bots_list = self.music_bots.copy()
             current_bots_list.remove(bot_username)
             self.music_bots = current_bots_list
-            await message.edit(f"Бот @{bot_username} удален из списка!")
+            await self._safe_edit(message, f"Бот @{bot_username} удален из списка!")
         else:
-            await message.edit("Этот бот не найден в списке!")
+            await self._safe_edit(message, "Этот бот не найден в списке!")
