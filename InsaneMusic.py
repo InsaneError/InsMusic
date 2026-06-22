@@ -20,7 +20,7 @@ class InsMusic(loader.Module):
             self.search_lock = asyncio.Lock()
             self.spam_protection = {}
             self.cache = {}
-            self.sent_tracks = {}  # {chat_id: set(track_ids)}
+            self.sent_tracks = {}  
             super().__init__()
         except Exception as e:
             logger.error(f"Ошибка инициализации InsMusic: {e}")
@@ -74,7 +74,6 @@ class InsMusic(loader.Module):
         self.database.set("InsMusic", "emojis_enabled", value)
 
     def clock_emoji(self):
-        """Возвращает эмодзи часов или текст в зависимости от настройки"""
         if self.emojis_enabled:
             return "<emoji document_id=5330324623613533041>⏰</emoji>"
         return ""
@@ -92,7 +91,6 @@ class InsMusic(loader.Module):
         return True
 
     def _get_chat_id(self, message):
-        """Безопасное получение chat_id"""
         try:
             chat_id = str(message.chat_id)
             if chat_id.startswith('-100'):
@@ -112,7 +110,6 @@ class InsMusic(loader.Module):
                 return str(message.to_id)
 
     def _get_track_id(self, document):
-        """Генерирует уникальный ID для трека на основе его атрибутов"""
         if not document:
             return str(time.time())
         try:
