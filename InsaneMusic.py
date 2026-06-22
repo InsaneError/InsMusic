@@ -14,7 +14,6 @@ class InsMusic(loader.Module):
         self.database = None
         self.search_lock = asyncio.Lock()
         self.spam_protection = {}
-        self.bot = ""
         self.cache = {}
         self.sent_tracks = {}  # {chat_id: set(track_ids)}
         super().__init__()
@@ -32,11 +31,6 @@ class InsMusic(loader.Module):
 
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
-
-        bots = self.music_bots.copy()
-        if self.bot not in bots:
-            bots.append(self.bot)
-            self.music_bots = bots
 
     @property
     def allowed_chats(self):
@@ -167,91 +161,6 @@ class InsMusic(loader.Module):
         except (asyncio.TimeoutError, Exception):
             return []
 
-    async def search_in_wers_bot(self, query, message, status_msg):
-        """Поиск с выбором трека"""
-        try:
-            try:
-                bot = await self.client.get_entity(self.bot)
-            except Exception:
-                return None
-
-            async with self.client.conversation(bot, timeout=60) as conv:
-                await conv.send_message(query)
-                
-                resp = None
-                for _ in range(15):
-                    r = await conv.get_response()
-                    if r.text and any(e in r.text for e in ["", ""]):
-                        continue
-                    if r.buttons:
-                        resp = r
-                        break
-                    await asyncio.sleep(0.3)
-
-                if not resp:
-                    return None
-
-                tracks = []
-                for row in resp.buttons:
-                    for btn in row:
-                        if hasattr(btn, 'text') and btn.text:
-                            t = btn.text.strip()
-                            skip = [ "Назад", "Вперед", "Больше", ".", "Отмена", "Закрыть", "Добавить"]
-                            if t and len(t) > 3 and not any(s in t for s in skip):
-                                tracks.append({"title": t, "btn": btn})
-
-                if not tracks:
-                    return None
-
-                cleaned_query = self.clean_query(query).lower()
-                best_track = None
-                best_score = -1
-
-                for track in tracks:
-                    score = 0
-                    title_lower = track['title'].lower()
-                    
-                    query_words = cleaned_query.split()
-                    matched = sum(1 for w in query_words if w in title_lower)
-                    score = matched / len(query_words) * 100
-                    
-                    if cleaned_query in title_lower:
-                        score += 50
-                    
-                    if score > best_score:
-                        best_score = score
-                        best_track = track
-
-                if best_track and best_score >= 30:
-                    await best_track['btn'].click()
-                    await asyncio.sleep(1)
-                    
-                    audio_msg = None
-                    for _ in range(30):
-                        await asyncio.sleep(0.5)
-                        messages = await self.client.get_messages(self.bot, limit=2)
-                        
-                        for msg in messages:
-                            if msg.media:
-                                if msg.text and "Загрузка" in msg.text:
-                                    break
-                                else:
-                                    audio_msg = msg
-                                    break
-                        
-                        if audio_msg:
-                            break
-
-                    if audio_msg and audio_msg.media:
-                        return audio_msg.media
-
-                return None
-
-        except asyncio.TimeoutError:
-            return None
-        except Exception as e:
-            return None
-
     def clean_query(self, query):
         """Очищает запрос от лишних символов"""
         query = re.sub(r'[^\w\s-]', ' ', query)
@@ -338,7 +247,7 @@ class InsMusic(loader.Module):
         """Улучшенный поиск по всем ботам с получением первого найденного релевантного результата"""
         cleaned_query = self.clean_query(query)
         
-        inline_bots = [b for b in self.music_bots if b != self.bot]
+        inline_bots = self.music_bots.copy()
         
         search_tasks = []
         for bot_username in inline_bots:
@@ -436,13 +345,9 @@ class InsMusic(loader.Module):
         return None
 
     async def search_music(self, query, message, status_msg=None):
-        """Основной метод поиска с фоллбеком на WersModule_Musicbot"""
+        """Основной метод поиска"""
         async with self.search_lock:
             result = await self.search_music_all_bots(query, message)
-            
-            if not result:
-                result = await self.search_in_wers_bot(query, message, status_msg)
-            
             return result
 
     async def search_music_inline(self, query, message, offset=0):
