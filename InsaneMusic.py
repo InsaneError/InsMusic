@@ -510,6 +510,53 @@ class InsMusic(loader.Module):
             result = await self.search_music_all_bots(query, message)
             return result
 
+    def _filter_duplicate_tracks(self, tracks):
+        """Фильтрует дубликаты треков по названию и исполнителю"""
+        if not tracks:
+            return []
+        
+        unique_tracks = []
+        seen_keys = set()
+        
+        for track in tracks:
+            title = track.get('title', '').lower().strip()
+            performer = track.get('performer', '').lower().strip()
+            
+            # Создаем ключ для сравнения
+            if title and performer:
+                key = f"{performer}|{title}"
+            elif title:
+                key = title
+            else:
+                # Если нет ни названия ни исполнителя, используем хеш документа
+                key = str(hash(str(track.get('document', ''))))
+            
+            # Проверяем похожие названия (без учёта регистра и спецсимволов)
+            is_duplicate = False
+            for existing_key in seen_keys:
+                # Если ключи совпадают - дубликат
+                if key == existing_key:
+                    is_duplicate = True
+                    break
+                
+                # Проверяем частичное совпадение (если одно название содержит другое)
+                if title and existing_key and '|' in existing_key:
+                    existing_title = existing_key.split('|', 1)[1] if '|' in existing_key else existing_key
+                    if title in existing_title or existing_title in title:
+                        # Если совпадают исполнители или один из них пустой
+                        if not performer or not existing_key.split('|')[0] or performer == existing_key.split('|')[0]:
+                            is_duplicate = True
+                            break
+            
+            if not is_duplicate:
+                seen_keys.add(key)
+                unique_tracks.append(track)
+            
+            if len(unique_tracks) >= 10:
+                break
+        
+        return unique_tracks
+
     async def search_music_inline(self, query, message, offset=0):
         """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
         if not query:
@@ -517,9 +564,50 @@ class InsMusic(loader.Module):
             
         cleaned_query = self.clean_query(query)
         
-        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
+        # Сначала проверяем приоритетного бота
+        priority_bot = "ShillMusic_bot"
+        priority_results = []
+        
+        if not self.is_bot_failed(priority_bot):
+            try:
+                results = await self.search_in_bot(priority_bot, cleaned_query, message)
+                if results:
+                    for result in results:
+                        if result and result.get('document'):
+                            track_info = self.extract_track_info_from_document(
+                                result['document'], 
+                                result.get('raw_title', '')
+                            )
+                            track_info.update({
+                                'bot': priority_bot,
+                                'document': result['document'],
+                                'result_id': result.get('result_id', 0),
+                                'original_result': result.get('original_result')
+                            })
+                            priority_results.append(track_info)
+            except Exception as e:
+                logger.error(f"Ошибка при поиске в приоритетном боте {priority_bot}: {e}")
+        
+        # Если приоритетный бот дал минимум 3 результата, возвращаем только их
+        if len(priority_results) >= 3:
+            # Сортируем по релевантности
+            priority_results.sort(
+                key=lambda x: self.calculate_relevance_score(x, cleaned_query), 
+                reverse=True
+            )
+            # Фильтруем дубликаты
+            return self._filter_duplicate_tracks(priority_results[:10])
+        
+        # Иначе собираем результаты со всех ботов
+        inline_bots = [bot for bot in self.music_bots if bot != priority_bot and not self.is_bot_failed(bot)]
         all_scored_results = []
         
+        # Добавляем результаты приоритетного бота с бонусом
+        for track_info in priority_results:
+            score = self.calculate_relevance_score(track_info, cleaned_query) + 20
+            all_scored_results.append((score, track_info))
+        
+        # Проверяем остальных ботов
         for bot_username in inline_bots:
             try:
                 results = await self.search_in_bot(bot_username, cleaned_query, message)
@@ -545,7 +633,7 @@ class InsMusic(loader.Module):
                     
                     score = self.calculate_relevance_score(track_info, cleaned_query)
                     
-                    preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot", "Lybot"]
+                    preferred_bots = ["AudioBoxrobot", "vkm4_bot", "Lybot"]
                     if bot_username in preferred_bots:
                         score += 10
                     
@@ -560,20 +648,11 @@ class InsMusic(loader.Module):
         
         all_scored_results.sort(key=lambda x: x[0], reverse=True)
         
-        unique_results = []
-        seen_documents = set()
+        # Извлекаем только треки без оценок
+        all_tracks = [track_info for score, track_info in all_scored_results]
         
-        for score, track_info in all_scored_results:
-            doc_id = id(track_info['document'])
-            
-            if doc_id not in seen_documents:
-                seen_documents.add(doc_id)
-                unique_results.append(track_info)
-            
-            if len(unique_results) >= 10:
-                break
-        
-        return unique_results
+        # Фильтруем дубликаты
+        return self._filter_duplicate_tracks(all_tracks[:20])
 
     async def _execute_search_and_send(self, message, search_query):
         """Общая логика поиска и отправки музыки"""
@@ -668,7 +747,7 @@ class InsMusic(loader.Module):
                 await self._safe_delete(emoji_message)
 
     async def _build_music_buttons(self, query: str, message: Message):
-        """Создает кнопки с результатами поиска"""
+        """Создает кнопки с результатами поиска, сначала проверяя ShillMusic_bot"""
         if not query:
             return [[{"text": "Пустой запрос", "action": "close"}]]
         
@@ -679,14 +758,17 @@ class InsMusic(loader.Module):
         
         buttons = []
         for i, result in enumerate(results[:10], 1):
-            
             title = result.get('title', 'Неизвестный трек')
             performer = result.get('performer', '')
             
+            # Добавляем бота в название для наглядности
+            bot = result.get('bot', '')
+            bot_tag = f" [{bot.replace('_bot', '')}]" if bot else ""
+            
             if performer:
-                display_name = f"{i}. {performer} - {title}"
+                display_name = f"{i}. {performer} - {title}{bot_tag}"
             else:
-                display_name = f"{i}. {title}"
+                display_name = f"{i}. {title}{bot_tag}"
             
             if len(display_name) > 40:
                 display_name = display_name[:37] + "..."
