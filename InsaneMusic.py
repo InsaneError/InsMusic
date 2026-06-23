@@ -21,7 +21,6 @@ class InsMusic(loader.Module):
             self.spam_protection = {}
             self.cache = {}
             self.sent_tracks = {}
-            self.failed_bots = {}
             super().__init__()
         except Exception as e:
             logger.error(f"Ошибка инициализации InsMusic: {e}")
@@ -35,7 +34,6 @@ class InsMusic(loader.Module):
         self.sent_tracks.clear()
         self.cache.clear()
         self.spam_protection.clear()
-        self.failed_bots.clear()
 
     async def client_ready(self, client, database):
         self.client = client
@@ -45,7 +43,7 @@ class InsMusic(loader.Module):
             self.database.set("InsMusic", "allowed_chats", [])
         
         if not self.database.get("InsMusic", "music_bots"):
-            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot"]
+            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
 
         if not self.database.get("InsMusic", "emojis_enabled"):
@@ -207,25 +205,8 @@ class InsMusic(loader.Module):
                 return await self._safe_send_file(to_id, file)
             raise e
 
-    def is_bot_failed(self, bot_username):
-        """Проверяет, не заблокирован ли бот для инлайн-режима"""
-        if bot_username in self.failed_bots:
-            fail_time = self.failed_bots[bot_username]
-            if time.time() - fail_time < 3600:
-                return True
-            else:
-                del self.failed_bots[bot_username]
-        return False
-
-    def mark_bot_failed(self, bot_username):
-        """Помечает бота как недоступного для инлайн-режима на час"""
-        self.failed_bots[bot_username] = time.time()
-
     async def search_in_bot(self, bot_username, query, message):
         """Улучшенный поиск в одном боте с получением нескольких результатов"""
-        if self.is_bot_failed(bot_username):
-            return []
-            
         try:
             results = await asyncio.wait_for(
                 message.client.inline_query(bot_username, query),
@@ -270,16 +251,8 @@ class InsMusic(loader.Module):
             
             return music_results
             
-        except asyncio.TimeoutError:
-            return []
-        except Exception as e:
-            error_str = str(e)
-            if "can't be used in inline mode" in error_str or "bot can't be used" in error_str.lower():
-                logger.warning(f"Бот {bot_username} не поддерживает инлайн-режим, временно исключен")
-                self.mark_bot_failed(bot_username)
-            elif "wait" in error_str.lower() and "second" in error_str.lower():
-                logger.debug(f"Бот {bot_username} требует ожидания")
-            else:
+        except (asyncio.TimeoutError, Exception) as e:
+            if not isinstance(e, asyncio.TimeoutError):
                 logger.error(f"Ошибка поиска в боте {bot_username}: {e}")
             return []
 
@@ -409,7 +382,7 @@ class InsMusic(loader.Module):
             words = cleaned_query.split()
             search_variations.append(' '.join(words[:-1]))
         
-        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
+        inline_bots = self.music_bots.copy()
         all_results = []
         
         for search_query in search_variations:
@@ -511,69 +484,63 @@ class InsMusic(loader.Module):
             return result
 
     async def search_music_inline(self, query, message, offset=0):
-        """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
+        """Поиск музыки для инлайн-режима с возвратом нескольких результатов (только Lybot)"""
         if not query:
             return []
             
         cleaned_query = self.clean_query(query)
         
-        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
-        all_scored_results = []
+        bot_username = "lybot"
         
-        for bot_username in inline_bots:
-            try:
-                results = await self.search_in_bot(bot_username, cleaned_query, message)
-                
-                if not results:
+        try:
+            results = await self.search_in_bot(bot_username, cleaned_query, message)
+            
+            if not results:
+                return []
+            
+            scored_results = []
+            for result in results:
+                if not result or not result.get('document'):
                     continue
                 
-                for result in results:
-                    if not result or not result.get('document'):
-                        continue
-                    
-                    track_info = self.extract_track_info_from_document(
-                        result['document'], 
-                        result.get('raw_title', '')
-                    )
-                    
-                    track_info.update({
-                        'bot': bot_username,
-                        'document': result['document'],
-                        'result_id': result.get('result_id', 0),
-                        'original_result': result.get('original_result')
-                    })
-                    
-                    score = self.calculate_relevance_score(track_info, cleaned_query)
-                    
-                    preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot", "Lybot"]
-                    if bot_username in preferred_bots:
-                        score += 10
-                    
-                    all_scored_results.append((score, track_info))
-                    
-            except Exception as e:
-                logger.error(f"Ошибка при поиске в {bot_username}: {e}")
-                continue
-        
-        if not all_scored_results:
+                track_info = self.extract_track_info_from_document(
+                    result['document'], 
+                    result.get('raw_title', '')
+                )
+                
+                track_info.update({
+                    'bot': result.get('bot', ''),
+                    'document': result['document'],
+                    'result_id': result.get('result_id', 0),
+                    'original_result': result.get('original_result')
+                })
+                
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                scored_results.append((score, track_info))
+            
+            if not scored_results:
+                return []
+            
+            scored_results.sort(key=lambda x: x[0], reverse=True)
+            
+            unique_results = []
+            seen_documents = set()
+            
+            for score, track_info in scored_results:
+                doc_id = id(track_info['document'])
+                
+                if doc_id not in seen_documents:
+                    seen_documents.add(doc_id)
+                    unique_results.append(track_info)
+                
+                if len(unique_results) >= 10:
+                    break
+            
+            return unique_results
+            
+        except Exception as e:
+            logger.error(f"Ошибка при поиске в Lybot: {e}")
             return []
-        
-        all_scored_results.sort(key=lambda x: x[0], reverse=True)
-        
-        unique_results = []
-        seen_documents = set()
-        
-        for score, track_info in all_scored_results:
-            doc_id = id(track_info['document'])
-            
-            if doc_id not in seen_documents:
-                seen_documents.add(doc_id)
-                unique_results.append(track_info)
-            
-            if len(unique_results) >= 10:
-                break
-        
-        return unique_results
 
     async def _execute_search_and_send(self, message, search_query):
         """Общая логика поиска и отправки музыки"""
@@ -640,7 +607,7 @@ class InsMusic(loader.Module):
         en_doc="<title> - Inline music search (works via inline)"
     )
     async def миcmd(self, message: Message):
-        """Инлайн-поиск музыки"""
+        """Инлайн-поиск музыки (только через Lybot)"""
         args = utils.get_args_raw(message)
         
         if not args:
@@ -654,21 +621,15 @@ class InsMusic(loader.Module):
             emoji_message = await self._safe_respond(message, self.clock_emoji())
         
         try:
-            buttons = await self._build_music_buttons(args, message)
-            if buttons:
-                await self.inline.form(
-                    text="Выберите трек:",
-                    message=message,
-                    reply_markup=buttons,
-                    silent=True
-                )
-            else:
-                error_message = await self._safe_respond(message, "Ничего не найдено")
-                await self.delete_after(error_message, 3)
+            await self.inline.form(
+                text="Выберите трек:",
+                message=message,
+                reply_markup=await self._build_music_buttons(args, message),
+                silent=True
+            )
         except Exception as e:
             logger.error(f"Ошибка в миcmd: {e}")
-            error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
-            await self.delete_after(error_message, 3)
+            await utils.answer(message, f"Ошибка: {str(e)}")
         finally:
             if emoji_message:
                 await self._safe_delete(emoji_message)
@@ -681,7 +642,7 @@ class InsMusic(loader.Module):
         results = await self.search_music_inline(query, message)
         
         if not results:
-            return None
+            return [[{"text": "Ничего не найдено", "action": "close"}]]
         
         buttons = []
         for i, result in enumerate(results[:10], 1):
@@ -769,17 +730,12 @@ class InsMusic(loader.Module):
                 if self.emojis_enabled:
                     emoji_message = await self._safe_respond(message, self.clock_emoji())
                 
-                buttons = await self._build_music_buttons(search_query, message)
-                if buttons:
-                    await self.inline.form(
-                        text="Выберите трек:",
-                        message=message,
-                        reply_markup=buttons,
-                        silent=True
-                    )
-                else:
-                    error_message = await self._safe_respond(message, "Ничего не найдено")
-                    await self.delete_after(error_message, 3)
+                await self.inline.form(
+                    text="Выберите трек:",
+                    message=message,
+                    reply_markup=await self._build_music_buttons(search_query, message),
+                    silent=True
+                )
             except Exception as e:
                 logger.error(f"Ошибка в watcher найтими: {e}")
                 error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
@@ -885,8 +841,7 @@ class InsMusic(loader.Module):
             
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(bots, 1):
-            status = " (недоступен)" if self.is_bot_failed(bot) else ""
-            text += f"{i}. @{bot}{status}\n"
+            text += f"{i}. @{bot}\n"
         await self._safe_edit(message, text)
 
     @loader.command(
@@ -929,8 +884,7 @@ class InsMusic(loader.Module):
             current_bots_list = self.music_bots.copy()
             current_bots_list.remove(bot_username)
             self.music_bots = current_bots_list
-            if bot_username in self.failed_bots:
-                del self.failed_bots[bot_username]
             await self._safe_edit(message, f"Бот @{bot_username} удален из списка!")
         else:
             await self._safe_edit(message, "Этот бот не найден в списке!")
+
