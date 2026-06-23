@@ -43,7 +43,7 @@ class InsMusic(loader.Module):
             self.database.set("InsMusic", "allowed_chats", [])
         
         if not self.database.get("InsMusic", "music_bots"):
-            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
+            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
             self.database.set("InsMusic", "music_bots", default_bots)
 
         if not self.database.get("InsMusic", "emojis_enabled"):
