@@ -4,7 +4,6 @@ import time
 import re
 import logging
 from telethon.tl.types import Message
-from telethon.errors.rpcerrorlist import FloodWaitError
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +21,7 @@ class InsMusic(loader.Module):
             self.spam_protection = {}
             self.cache = {}
             self.sent_tracks = {}
-            self.bot_cooldowns = {}
-            self.unsupported_bots = set()
+            self.failed_bots = {}
             super().__init__()
         except Exception as e:
             logger.error(f"Ошибка инициализации InsMusic: {e}")
@@ -37,8 +35,7 @@ class InsMusic(loader.Module):
         self.sent_tracks.clear()
         self.cache.clear()
         self.spam_protection.clear()
-        self.bot_cooldowns.clear()
-        self.unsupported_bots.clear()
+        self.failed_bots.clear()
 
     async def client_ready(self, client, database):
         self.client = client
@@ -48,15 +45,11 @@ class InsMusic(loader.Module):
             self.database.set("InsMusic", "allowed_chats", [])
         
         if not self.database.get("InsMusic", "music_bots"):
-            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot", "DeezerMusicBot", "SpotifyDownloaderBot","shazambot"]
+            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot"]
             self.database.set("InsMusic", "music_bots", default_bots)
 
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
-
-        if not self.database.get("InsMusic", "inline_bots"):
-            default_inline_bots = ["Lybot", "ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
-            self.database.set("InsMusic", "inline_bots", default_inline_bots)
 
     async def _safe_respond(self, message, text):
         """Безопасная отправка ответа с обработкой TOPIC_CLOSED"""
@@ -122,14 +115,6 @@ class InsMusic(loader.Module):
     @music_bots.setter
     def music_bots(self, value):
         self.database.set("InsMusic", "music_bots", value)
-
-    @property
-    def inline_bots(self):
-        return self.database.get("InsMusic", "inline_bots", [])
-
-    @inline_bots.setter
-    def inline_bots(self, value):
-        self.database.set("InsMusic", "inline_bots", value)
 
     @property
     def emojis_enabled(self):
@@ -222,31 +207,37 @@ class InsMusic(loader.Module):
                 return await self._safe_send_file(to_id, file)
             raise e
 
+    def is_bot_failed(self, bot_username):
+        """Проверяет, не заблокирован ли бот для инлайн-режима"""
+        if bot_username in self.failed_bots:
+            fail_time = self.failed_bots[bot_username]
+            if time.time() - fail_time < 3600:
+                return True
+            else:
+                del self.failed_bots[bot_username]
+        return False
+
+    def mark_bot_failed(self, bot_username):
+        """Помечает бота как недоступного для инлайн-режима на час"""
+        self.failed_bots[bot_username] = time.time()
+
     async def search_in_bot(self, bot_username, query, message):
         """Улучшенный поиск в одном боте с получением нескольких результатов"""
-        if bot_username in self.unsupported_bots:
+        if self.is_bot_failed(bot_username):
             return []
-        
-        current_time = time.time()
-        if bot_username in self.bot_cooldowns:
-            if current_time - self.bot_cooldowns[bot_username] < 5:
-                return []
-        
+            
         try:
             results = await asyncio.wait_for(
                 message.client.inline_query(bot_username, query),
-                timeout=4.0
+                timeout=3.0
             )
-            
-            if bot_username in self.bot_cooldowns:
-                del self.bot_cooldowns[bot_username]
             
             if not results or not hasattr(results, '__iter__'):
                 return []
             
             music_results = []
             
-            for i in range(min(len(results), 15)):
+            for i in range(min(len(results), 10)):
                 result = results[i]
                 if hasattr(result.result, 'document') and result.result.document:
                     try:
@@ -264,16 +255,12 @@ class InsMusic(loader.Module):
                         if not title and hasattr(result.result, 'title'):
                             title = result.result.title
                         
-                        if not title and hasattr(result.result, 'description'):
-                            title = result.result.description
-                        
                         music_results.append({
                             'bot': bot_username,
                             'document': doc,
                             'title': title,
                             'performer': performer,
                             'raw_title': result.result.title if hasattr(result.result, 'title') else '',
-                            'description': result.result.description if hasattr(result.result, 'description') else '',
                             'result_id': i,  
                             'original_result': result  
                         })
@@ -283,25 +270,16 @@ class InsMusic(loader.Module):
             
             return music_results
             
-        except FloodWaitError as e:
-            wait_time = e.seconds
-            logger.warning(f"Flood wait для {bot_username}: {wait_time} сек")
-            self.bot_cooldowns[bot_username] = current_time + wait_time
+        except asyncio.TimeoutError:
             return []
         except Exception as e:
             error_str = str(e)
-            
-            if "inline mode" in error_str.lower() or "BOT_INLINE_DISABLED" in error_str:
-                logger.warning(f"Бот {bot_username} не поддерживает инлайн-режим, добавлен в черный список")
-                self.unsupported_bots.add(bot_username)
-                return []
-            
-            if "wait" in error_str.lower() or "FLOOD_WAIT" in error_str:
-                logger.warning(f"Rate limit для {bot_username}")
-                self.bot_cooldowns[bot_username] = current_time
-                return []
-            
-            if not isinstance(e, asyncio.TimeoutError):
+            if "can't be used in inline mode" in error_str or "bot can't be used" in error_str.lower():
+                logger.warning(f"Бот {bot_username} не поддерживает инлайн-режим, временно исключен")
+                self.mark_bot_failed(bot_username)
+            elif "wait" in error_str.lower() and "second" in error_str.lower():
+                logger.debug(f"Бот {bot_username} требует ожидания")
+            else:
                 logger.error(f"Ошибка поиска в боте {bot_username}: {e}")
             return []
 
@@ -325,20 +303,19 @@ class InsMusic(loader.Module):
         title_lower = track_info.get('title', '').lower()
         performer_lower = track_info.get('performer', '').lower()
         raw_title_lower = track_info.get('raw_title', '').lower()
-        description_lower = track_info.get('description', '').lower()
         
         if query_lower == title_lower:
             score += 150
         if query_lower == performer_lower:
             score += 100
+        
         if query_lower in title_lower:
             score += 60
         if query_lower in performer_lower:
             score += 40
+        
         if query_lower in raw_title_lower:
             score += 30
-        if query_lower in description_lower:
-            score += 20
         
         matched_title_words = 0
         matched_performer_words = 0
@@ -361,9 +338,6 @@ class InsMusic(loader.Module):
             
             if word in raw_title_lower:
                 score += 5
-            
-            if word in description_lower:
-                score += 3
         
         if total_words > 0 and matched_title_words == total_words:
             score += 30
@@ -388,10 +362,10 @@ class InsMusic(loader.Module):
         
         return score
 
-    def extract_track_info_from_document(self, document, raw_title="", description=""):
+    def extract_track_info_from_document(self, document, raw_title=""):
         """Извлекает информацию о треке из документа"""
         if not document:
-            return {'title': '', 'performer': '', 'raw_title': raw_title, 'description': description}
+            return {'title': '', 'performer': '', 'raw_title': raw_title}
             
         title = ""
         performer = ""
@@ -402,12 +376,6 @@ class InsMusic(loader.Module):
                     title = attr.title
                 if hasattr(attr, 'performer'):
                     performer = attr.performer
-        
-        if not title and raw_title:
-            title = raw_title
-        
-        if not title and description:
-            title = description
         
         if not title and hasattr(document, 'name') and document.name:
             filename = document.name.lower()
@@ -422,11 +390,10 @@ class InsMusic(loader.Module):
         return {
             'title': title,
             'performer': performer,
-            'raw_title': raw_title,
-            'description': description
+            'raw_title': raw_title
         }
 
-    async def search_music_all_bots(self, query, message, bot_list=None):
+    async def search_music_all_bots(self, query, message):
         """Улучшенный поиск по всем ботам с приоритетом названия"""
         if not query:
             return None
@@ -438,20 +405,11 @@ class InsMusic(loader.Module):
             cleaned_query.lower(),
         ]
         
-        words = cleaned_query.split()
-        if len(words) > 2:
+        if len(cleaned_query.split()) > 2:
+            words = cleaned_query.split()
             search_variations.append(' '.join(words[:-1]))
-            search_variations.append(' '.join(words[:2]))
         
-        if bot_list is None:
-            inline_bots = [bot for bot in self.music_bots if bot not in self.unsupported_bots]
-        else:
-            inline_bots = [bot for bot in bot_list if bot not in self.unsupported_bots]
-        
-        if not inline_bots:
-            logger.warning("Нет доступных ботов для поиска")
-            return None
-        
+        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
         all_results = []
         
         for search_query in search_variations:
@@ -464,7 +422,7 @@ class InsMusic(loader.Module):
                 search_tasks.append(task)
             
             start_time = time.time()
-            timeout = 10.0
+            timeout = 8.0
             
             while time.time() - start_time < timeout and search_tasks:
                 completed = [t for t in search_tasks if t.done()]
@@ -484,8 +442,7 @@ class InsMusic(loader.Module):
                                 
                                 track_info = self.extract_track_info_from_document(
                                     result['document'], 
-                                    result.get('raw_title', ''),
-                                    result.get('description', '')
+                                    result.get('raw_title', '')
                                 )
                                 
                                 track_info.update({
@@ -519,8 +476,7 @@ class InsMusic(loader.Module):
                 
                 track_info = self.extract_track_info_from_document(
                     result['document'], 
-                    result.get('raw_title', ''),
-                    result.get('description', '')
+                    result.get('raw_title', '')
                 )
                 
                 track_info.update({
@@ -532,7 +488,7 @@ class InsMusic(loader.Module):
                 
                 score = self.calculate_relevance_score(track_info, cleaned_query)
                 
-                preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot", "Lybot"]
+                preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
                 if track_info['bot'] in preferred_bots:
                     score += 5
                 
@@ -555,94 +511,59 @@ class InsMusic(loader.Module):
             return result
 
     async def search_music_inline(self, query, message, offset=0):
-        """Поиск музыки для инлайн-режима с возвратом нескольких результатов из нескольких ботов"""
+        """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
         if not query:
             return []
             
         cleaned_query = self.clean_query(query)
         
-        inline_bots = [bot for bot in self.inline_bots if bot not in self.unsupported_bots]
+        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
+        all_scored_results = []
         
-        if not inline_bots:
-            inline_bots = ["Lybot", "ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
-            inline_bots = [bot for bot in inline_bots if bot not in self.unsupported_bots]
-        
-        if not inline_bots:
-            return []
-        
-        all_results = []
-        
-        search_variations = [
-            cleaned_query,
-            cleaned_query.lower(),
-        ]
-        
-        words = cleaned_query.split()
-        if len(words) > 2:
-            search_variations.append(' '.join(words[:-1]))
-            search_variations.append(' '.join(words[:2]))
-        
-        for search_query in search_variations:
-            if not search_query:
-                continue
-            
-            search_tasks = []
-            for bot_username in inline_bots:
-                task = asyncio.create_task(self.search_in_bot(bot_username, search_query, message))
-                search_tasks.append(task)
-            
-            start_time = time.time()
-            timeout = 8.0
-            
-            while time.time() - start_time < timeout and search_tasks:
-                completed = [t for t in search_tasks if t.done()]
+        for bot_username in inline_bots:
+            try:
+                results = await self.search_in_bot(bot_username, cleaned_query, message)
                 
-                for task in completed:
-                    search_tasks.remove(task)
+                if not results:
+                    continue
+                
+                for result in results:
+                    if not result or not result.get('document'):
+                        continue
                     
-                    try:
-                        results = task.result()
-                        if isinstance(results, list) and results:
-                            all_results.extend(results)
-                    except Exception as e:
-                        logger.error(f"Ошибка обработки результатов инлайн: {e}")
-                
-                if search_tasks:
-                    await asyncio.sleep(0.1)
-        
-        if not all_results:
-            return []
-        
-        scored_results = []
-        for result in all_results:
-            if not result or not result.get('document'):
+                    track_info = self.extract_track_info_from_document(
+                        result['document'], 
+                        result.get('raw_title', '')
+                    )
+                    
+                    track_info.update({
+                        'bot': bot_username,
+                        'document': result['document'],
+                        'result_id': result.get('result_id', 0),
+                        'original_result': result.get('original_result')
+                    })
+                    
+                    score = self.calculate_relevance_score(track_info, cleaned_query)
+                    
+                    preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot", "Lybot"]
+                    if bot_username in preferred_bots:
+                        score += 10
+                    
+                    all_scored_results.append((score, track_info))
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при поиске в {bot_username}: {e}")
                 continue
-            
-            track_info = self.extract_track_info_from_document(
-                result['document'], 
-                result.get('raw_title', ''),
-                result.get('description', '')
-            )
-            
-            track_info.update({
-                'bot': result.get('bot', ''),
-                'document': result['document'],
-                'result_id': result.get('result_id', 0),
-                'original_result': result.get('original_result')
-            })
-            
-            score = self.calculate_relevance_score(track_info, cleaned_query)
-            scored_results.append((score, track_info))
         
-        if not scored_results:
+        if not all_scored_results:
             return []
         
-        scored_results.sort(key=lambda x: x[0], reverse=True)
+        all_scored_results.sort(key=lambda x: x[0], reverse=True)
         
         unique_results = []
         seen_documents = set()
         
-        for score, track_info in scored_results:
+        for score, track_info in all_scored_results:
             doc_id = id(track_info['document'])
             
             if doc_id not in seen_documents:
@@ -719,7 +640,7 @@ class InsMusic(loader.Module):
         en_doc="<title> - Inline music search (works via inline)"
     )
     async def миcmd(self, message: Message):
-        """Инлайн-поиск музыки (через несколько ботов)"""
+        """Инлайн-поиск музыки"""
         args = utils.get_args_raw(message)
         
         if not args:
@@ -733,15 +654,21 @@ class InsMusic(loader.Module):
             emoji_message = await self._safe_respond(message, self.clock_emoji())
         
         try:
-            await self.inline.form(
-                text="Выберите трек:",
-                message=message,
-                reply_markup=await self._build_music_buttons(args, message),
-                silent=True
-            )
+            buttons = await self._build_music_buttons(args, message)
+            if buttons:
+                await self.inline.form(
+                    text="Выберите трек:",
+                    message=message,
+                    reply_markup=buttons,
+                    silent=True
+                )
+            else:
+                error_message = await self._safe_respond(message, "Ничего не найдено")
+                await self.delete_after(error_message, 3)
         except Exception as e:
             logger.error(f"Ошибка в миcmd: {e}")
-            await utils.answer(message, f"Ошибка: {str(e)}")
+            error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
+            await self.delete_after(error_message, 3)
         finally:
             if emoji_message:
                 await self._safe_delete(emoji_message)
@@ -754,7 +681,7 @@ class InsMusic(loader.Module):
         results = await self.search_music_inline(query, message)
         
         if not results:
-            return [[{"text": "Ничего не найдено", "action": "close"}]]
+            return None
         
         buttons = []
         for i, result in enumerate(results[:10], 1):
@@ -763,12 +690,12 @@ class InsMusic(loader.Module):
             performer = result.get('performer', '')
             
             if performer:
-                display_name = f"{performer} - {title}"
+                display_name = f"{i}. {performer} - {title}"
             else:
-                display_name = f"{title}"
+                display_name = f"{i}. {title}"
             
-            if len(display_name) > 35:
-                display_name = display_name[:32] + "..."
+            if len(display_name) > 40:
+                display_name = display_name[:37] + "..."
             
             buttons.append([{
                 "text": f"{display_name}",
@@ -842,12 +769,17 @@ class InsMusic(loader.Module):
                 if self.emojis_enabled:
                     emoji_message = await self._safe_respond(message, self.clock_emoji())
                 
-                await self.inline.form(
-                    text="Выберите трек:",
-                    message=message,
-                    reply_markup=await self._build_music_buttons(search_query, message),
-                    silent=True
-                )
+                buttons = await self._build_music_buttons(search_query, message)
+                if buttons:
+                    await self.inline.form(
+                        text="Выберите трек:",
+                        message=message,
+                        reply_markup=buttons,
+                        silent=True
+                    )
+                else:
+                    error_message = await self._safe_respond(message, "Ничего не найдено")
+                    await self.delete_after(error_message, 3)
             except Exception as e:
                 logger.error(f"Ошибка в watcher найтими: {e}")
                 error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
@@ -953,23 +885,8 @@ class InsMusic(loader.Module):
             
         text = "Боты для поиска музыки:\n\n"
         for i, bot in enumerate(bots, 1):
-            text += f"{i}. @{bot}\n"
-        await self._safe_edit(message, text)
-
-    @loader.command(
-        ru_doc="Показывает список ботов для инлайн-поиска",
-        en_doc="Shows list of inline search bots"
-    )
-    async def inlinebotsmcmd(self, message):
-        """Список ботов для инлайн-поиска"""
-        bots = self.inline_bots
-        if not bots:
-            await self._safe_edit(message, "Список ботов для инлайн-поиска пуст!")
-            return
-            
-        text = "Боты для инлайн-поиска:\n\n"
-        for i, bot in enumerate(bots, 1):
-            text += f"{i}. @{bot}\n"
+            status = " (недоступен)" if self.is_bot_failed(bot) else ""
+            text += f"{i}. @{bot}{status}\n"
         await self._safe_edit(message, text)
 
     @loader.command(
@@ -991,36 +908,10 @@ class InsMusic(loader.Module):
         if bot_username in self.music_bots:
             await self._safe_edit(message, "Этот бот уже есть в списке!")
         else:
-            self.unsupported_bots.discard(bot_username)
             current_bots_list = self.music_bots.copy()
             current_bots_list.append(bot_username)
             self.music_bots = current_bots_list
             await self._safe_edit(message, f"Бот @{bot_username} добавлен в список!")
-
-    @loader.command(
-        ru_doc="<юзернейм> - Добавляет бота в список для инлайн-поиска",
-        en_doc="<username> - Adds bot to inline search list"
-    )
-    async def addinlinebotmcmd(self, message):
-        """Добавить бота для инлайн-поиска"""
-        args = utils.get_args_raw(message)
-        if not args:
-            await self._safe_edit(message, "Укажите username бота!")
-            return
-        
-        bot_username = args.replace('@', '').strip()
-        if not bot_username:
-            await self._safe_edit(message, "Некорректный username бота!")
-            return
-            
-        if bot_username in self.inline_bots:
-            await self._safe_edit(message, "Этот бот уже в списке инлайн-поиска!")
-        else:
-            self.unsupported_bots.discard(bot_username)
-            current_bots_list = self.inline_bots.copy()
-            current_bots_list.append(bot_username)
-            self.inline_bots = current_bots_list
-            await self._safe_edit(message, f"Бот @{bot_username} добавлен в инлайн-список!")
 
     @loader.command(
         ru_doc="<юзернейм> - Удаляет бота из списка для поиска музыки",
@@ -1038,39 +929,8 @@ class InsMusic(loader.Module):
             current_bots_list = self.music_bots.copy()
             current_bots_list.remove(bot_username)
             self.music_bots = current_bots_list
-            self.unsupported_bots.discard(bot_username)
+            if bot_username in self.failed_bots:
+                del self.failed_bots[bot_username]
             await self._safe_edit(message, f"Бот @{bot_username} удален из списка!")
         else:
             await self._safe_edit(message, "Этот бот не найден в списке!")
-
-    @loader.command(
-        ru_doc="<юзернейм> - Удаляет бота из списка для инлайн-поиска",
-        en_doc="<username> - Removes bot from inline search list"
-    )
-    async def delinlinebotmcmd(self, message):
-        """Удалить бота из инлайн-поиска"""
-        args = utils.get_args_raw(message)
-        if not args:
-            await self._safe_edit(message, "Укажите username бота!")
-            return
-        
-        bot_username = args.replace('@', '').strip()
-        if bot_username in self.inline_bots:
-            current_bots_list = self.inline_bots.copy()
-            current_bots_list.remove(bot_username)
-            self.inline_bots = current_bots_list
-            self.unsupported_bots.discard(bot_username)
-            await self._safe_edit(message, f"Бот @{bot_username} удален из инлайн-списка!")
-        else:
-            await self._safe_edit(message, "Этот бот не найден в инлайн-списке!")
-
-    @loader.command(
-        ru_doc="Сбрасывает черный список ботов",
-        en_doc="Resets the bot blacklist"
-    )
-    async def resetbotsmcmd(self, message):
-        """Сбросить черный список ботов"""
-        count = len(self.unsupported_bots)
-        self.unsupported_bots.clear()
-        self.bot_cooldowns.clear()
-        await self._safe_edit(message, f"Черный список очищен! Удалено {count} ботов.")
