@@ -51,10 +51,68 @@ class InsMusic(loader.Module):
         if not self.database.get("InsMusic", "emojis_enabled"):
             self.database.set("InsMusic", "emojis_enabled", True)
 
-    async def _safe_respond(self, message, text):
-        """Безопасная отправка ответа с обработкой TOPIC_CLOSED"""
+    def _get_topic_id(self, message):
+        """Получает ID темы из сообщения"""
         try:
-            return await message.respond(text)
+            # Проверяем reply_to
+            if hasattr(message, 'reply_to') and message.reply_to:
+                if hasattr(message.reply_to, 'forum_topic') and message.reply_to.forum_topic:
+                    return message.reply_to.reply_to_msg_id
+                elif hasattr(message.reply_to, 'reply_to_msg_id'):
+                    return message.reply_to.reply_to_msg_id
+            
+            # Проверяем прямой атрибут
+            if hasattr(message, 'topic_id'):
+                return message.topic_id
+            
+            # Проверяем chat
+            if hasattr(message, 'chat') and hasattr(message.chat, 'forum') and message.chat.forum:
+                if hasattr(message, 'reply_to_msg_id'):
+                    return message.reply_to_msg_id
+            
+            return None
+        except Exception:
+            return None
+
+    def _is_forum_chat(self, message):
+        """Проверяет, является ли чат форумом"""
+        try:
+            if hasattr(message, 'chat') and hasattr(message.chat, 'forum'):
+                return message.chat.forum
+            if hasattr(message, 'to_id') and hasattr(message.to_id, 'forum'):
+                return message.to_id.forum
+            return False
+        except Exception:
+            return False
+
+    async def _safe_respond(self, message, text):
+        """Безопасная отправка ответа с обработкой TOPIC_CLOSED и поддержкой тем"""
+        try:
+            topic_id = self._get_topic_id(message)
+            is_forum = self._is_forum_chat(message)
+            
+            # В некоторых версиях Telethon topic передается через reply_to
+            if topic_id and is_forum:
+                try:
+                    # Пробуем через reply_to
+                    return await self.client.send_message(
+                        message.to_id, 
+                        text, 
+                        reply_to=topic_id
+                    )
+                except TypeError:
+                    # Если не поддерживается, пробуем через topic
+                    try:
+                        return await self.client.send_message(
+                            message.to_id, 
+                            text, 
+                            topic=topic_id
+                        )
+                    except TypeError:
+                        # Если ничего не работает, отправляем без темы
+                        return await self.client.send_message(message.to_id, text)
+            else:
+                return await message.respond(text)
         except Exception as e:
             if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
                 try:
@@ -64,14 +122,34 @@ class InsMusic(loader.Module):
             raise e
 
     async def _safe_edit(self, message, text):
-        """Безопасное редактирование с обработкой TOPIC_CLOSED"""
+        """Безопасное редактирование с обработкой TOPIC_CLOSED и поддержкой тем"""
         try:
             return await message.edit(text)
         except Exception as e:
             if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
                 try:
                     await message.delete()
-                    return await self.client.send_message(message.to_id, text)
+                    topic_id = self._get_topic_id(message)
+                    is_forum = self._is_forum_chat(message)
+                    
+                    if topic_id and is_forum:
+                        try:
+                            return await self.client.send_message(
+                                message.to_id, 
+                                text, 
+                                reply_to=topic_id
+                            )
+                        except TypeError:
+                            try:
+                                return await self.client.send_message(
+                                    message.to_id, 
+                                    text, 
+                                    topic=topic_id
+                                )
+                            except TypeError:
+                                return await self.client.send_message(message.to_id, text)
+                    else:
+                        return await self.client.send_message(message.to_id, text)
                 except Exception:
                     pass
             raise e
@@ -84,17 +162,20 @@ class InsMusic(loader.Module):
             pass
 
     async def _safe_send_file(self, to_id, file, reply_to=None):
-        """Безопасная отправка файла с обработкой TOPIC_CLOSED"""
+        """Безопасная отправка файла с обработкой TOPIC_CLOSED и поддержкой тем"""
         try:
+            kwargs = {}
             if reply_to:
-                try:
-                    return await self.client.send_file(to_id, file, reply_to=reply_to)
-                except Exception as e:
-                    if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
-                        return await self.client.send_file(to_id, file)
-                    raise e
-            else:
-                return await self.client.send_file(to_id, file)
+                kwargs['reply_to'] = reply_to
+            
+            try:
+                return await self.client.send_file(to_id, file, **kwargs)
+            except Exception as e:
+                if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
+                    # Пробуем без reply_to
+                    kwargs.pop('reply_to', None)
+                    return await self.client.send_file(to_id, file, **kwargs)
+                raise e
         except Exception as e:
             if "TOPIC_CLOSED" not in str(e) and "TOPIC_DELETED" not in str(e):
                 raise e
@@ -192,16 +273,29 @@ class InsMusic(loader.Module):
     async def _send_with_reply(self, to_id, file, reply_to_msg):
         """Отправляет файл с учетом темы"""
         try:
-            if hasattr(reply_to_msg, 'reply_to') and reply_to_msg.reply_to:
-                if hasattr(reply_to_msg.reply_to, 'forum_topic') and reply_to_msg.reply_to.forum_topic:
-                    return await self.client.send_file(
+            topic_id = self._get_topic_id(reply_to_msg)
+            is_forum = self._is_forum_chat(reply_to_msg)
+            
+            # В некоторых версиях Telethon для тем используется reply_to с ID темы
+            if topic_id and is_forum:
+                try:
+                    return await self._safe_send_file(
                         to_id,
                         file,
-                        reply_to=reply_to_msg.id,
-                        topic=reply_to_msg.reply_to.reply_to_msg_id
+                        reply_to=topic_id
                     )
-            
-            return await self._safe_send_file(to_id, file, reply_to_msg.id)
+                except TypeError:
+                    return await self._safe_send_file(
+                        to_id,
+                        file,
+                        reply_to=reply_to_msg.id
+                    )
+            else:
+                return await self._safe_send_file(
+                    to_id,
+                    file,
+                    reply_to=reply_to_msg.id
+                )
         except Exception as e:
             if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
                 return await self._safe_send_file(to_id, file)
@@ -522,28 +616,22 @@ class InsMusic(loader.Module):
             title = track.get('title', '').lower().strip()
             performer = track.get('performer', '').lower().strip()
             
-            # Создаем ключ для сравнения
             if title and performer:
                 key = f"{performer}|{title}"
             elif title:
                 key = title
             else:
-                # Если нет ни названия ни исполнителя, используем хеш документа
                 key = str(hash(str(track.get('document', ''))))
             
-            # Проверяем похожие названия (без учёта регистра и спецсимволов)
             is_duplicate = False
             for existing_key in seen_keys:
-                # Если ключи совпадают - дубликат
                 if key == existing_key:
                     is_duplicate = True
                     break
                 
-                # Проверяем частичное совпадение (если одно название содержит другое)
                 if title and existing_key and '|' in existing_key:
                     existing_title = existing_key.split('|', 1)[1] if '|' in existing_key else existing_key
                     if title in existing_title or existing_title in title:
-                        # Если совпадают исполнители или один из них пустой
                         if not performer or not existing_key.split('|')[0] or performer == existing_key.split('|')[0]:
                             is_duplicate = True
                             break
@@ -564,7 +652,6 @@ class InsMusic(loader.Module):
             
         cleaned_query = self.clean_query(query)
         
-        # Сначала проверяем приоритетного бота
         priority_bot = "ShillMusic_bot"
         priority_results = []
         
@@ -588,26 +675,20 @@ class InsMusic(loader.Module):
             except Exception as e:
                 logger.error(f"Ошибка при поиске в приоритетном боте {priority_bot}: {e}")
         
-        # Если приоритетный бот дал минимум 3 результата, возвращаем только их
         if len(priority_results) >= 3:
-            # Сортируем по релевантности
             priority_results.sort(
                 key=lambda x: self.calculate_relevance_score(x, cleaned_query), 
                 reverse=True
             )
-            # Фильтруем дубликаты
             return self._filter_duplicate_tracks(priority_results[:10])
         
-        # Иначе собираем результаты со всех ботов
         inline_bots = [bot for bot in self.music_bots if bot != priority_bot and not self.is_bot_failed(bot)]
         all_scored_results = []
         
-        # Добавляем результаты приоритетного бота с бонусом
         for track_info in priority_results:
             score = self.calculate_relevance_score(track_info, cleaned_query) + 20
             all_scored_results.append((score, track_info))
         
-        # Проверяем остальных ботов
         for bot_username in inline_bots:
             try:
                 results = await self.search_in_bot(bot_username, cleaned_query, message)
@@ -647,11 +728,8 @@ class InsMusic(loader.Module):
             return []
         
         all_scored_results.sort(key=lambda x: x[0], reverse=True)
-        
-        # Извлекаем только треки без оценок
         all_tracks = [track_info for score, track_info in all_scored_results]
         
-        # Фильтруем дубликаты
         return self._filter_duplicate_tracks(all_tracks[:20])
 
     async def _execute_search_and_send(self, message, search_query):
@@ -726,27 +804,21 @@ class InsMusic(loader.Module):
             await utils.answer(message, "Укажите название песни для поиска!")
             return
         
-        # Отправляем сообщение с часами до удаления исходного
         emoji_message = None
         if self.emojis_enabled:
             emoji_message = await self._safe_respond(message, self.clock_emoji())
         
-        # Удаляем исходную команду ПОСЛЕ отправки нового сообщения
         await self._safe_delete(message)
         
         try:
-            # Используем для формы НОВОЕ сообщение (emoji_message)
             if emoji_message:
-                # Редактируем сообщение с часами, превращая его в форму
                 await self.inline.form(
                     text="Выберите трек:",
-                    message=emoji_message,  # <-- Используем новое сообщение
+                    message=emoji_message,
                     reply_markup=await self._build_music_buttons(args, message),
                     silent=True
                 )
             else:
-                # Если эмодзи отключены, отправляем новое сообщение с формой
-                # Создаем новое сообщение, так как оригинал удален
                 temp_msg = await self._safe_respond(message, "Выберите трек:")
                 await self.inline.form(
                     text="Выберите трек:",
@@ -756,7 +828,6 @@ class InsMusic(loader.Module):
                 )
         except Exception as e:
             logger.error(f"Ошибка в миcmd: {e}")
-            # Если форма не создалась, отправляем ошибку
             error_text = f"Ошибка: {str(e)}"
             if emoji_message:
                 await self._safe_edit(emoji_message, error_text)
@@ -778,7 +849,6 @@ class InsMusic(loader.Module):
             title = result.get('title', 'Неизвестный трек')
             performer = result.get('performer', '')
             
-            # Добавляем бота в название для наглядности
             bot = result.get('bot', '')
             bot_tag = f" [{bot.replace('_bot', '')}]" if bot else ""
             
@@ -855,16 +925,13 @@ class InsMusic(loader.Module):
             if not search_query:
                 return
             
-            # Отправляем сообщение с часами до удаления исходного
             emoji_message = None
             try:
                 if self.emojis_enabled:
                     emoji_message = await self._safe_respond(message, self.clock_emoji())
                 
-                # Удаляем исходную команду ПОСЛЕ отправки нового сообщения
                 await self._safe_delete(message)
                 
-                # Используем для формы НОВОЕ сообщение (emoji_message)
                 if emoji_message:
                     await self.inline.form(
                         text="Выберите трек:",
@@ -873,7 +940,6 @@ class InsMusic(loader.Module):
                         silent=True
                     )
                 else:
-                    # Если эмодзи отключены, отправляем новое сообщение с формой
                     temp_msg = await self._safe_respond(message, "Выберите трек:")
                     await self.inline.form(
                         text="Выберите трек:",
