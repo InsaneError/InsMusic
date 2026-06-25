@@ -726,25 +726,42 @@ class InsMusic(loader.Module):
             await utils.answer(message, "Укажите название песни для поиска!")
             return
         
-        await self._safe_delete(message)
-        
+        # Отправляем сообщение с часами до удаления исходного
         emoji_message = None
         if self.emojis_enabled:
             emoji_message = await self._safe_respond(message, self.clock_emoji())
         
+        # Удаляем исходную команду ПОСЛЕ отправки нового сообщения
+        await self._safe_delete(message)
+        
         try:
-            await self.inline.form(
-                text="Выберите трек:",
-                message=message,
-                reply_markup=await self._build_music_buttons(args, message),
-                silent=True
-            )
+            # Используем для формы НОВОЕ сообщение (emoji_message)
+            if emoji_message:
+                # Редактируем сообщение с часами, превращая его в форму
+                await self.inline.form(
+                    text="Выберите трек:",
+                    message=emoji_message,  # <-- Используем новое сообщение
+                    reply_markup=await self._build_music_buttons(args, message),
+                    silent=True
+                )
+            else:
+                # Если эмодзи отключены, отправляем новое сообщение с формой
+                # Создаем новое сообщение, так как оригинал удален
+                temp_msg = await self._safe_respond(message, "Выберите трек:")
+                await self.inline.form(
+                    text="Выберите трек:",
+                    message=temp_msg,
+                    reply_markup=await self._build_music_buttons(args, message),
+                    silent=True
+                )
         except Exception as e:
             logger.error(f"Ошибка в миcmd: {e}")
-            await utils.answer(message, f"Ошибка: {str(e)}")
-        finally:
+            # Если форма не создалась, отправляем ошибку
+            error_text = f"Ошибка: {str(e)}"
             if emoji_message:
-                await self._safe_delete(emoji_message)
+                await self._safe_edit(emoji_message, error_text)
+            else:
+                await self._safe_respond(message, error_text)
 
     async def _build_music_buttons(self, query: str, message: Message):
         """Создает кнопки с результатами поиска, сначала проверяя ShillMusic_bot"""
@@ -838,26 +855,36 @@ class InsMusic(loader.Module):
             if not search_query:
                 return
             
+            # Отправляем сообщение с часами до удаления исходного
             emoji_message = None
             try:
-                await self._safe_delete(message)
-                
                 if self.emojis_enabled:
                     emoji_message = await self._safe_respond(message, self.clock_emoji())
                 
-                await self.inline.form(
-                    text="Выберите трек:",
-                    message=message,
-                    reply_markup=await self._build_music_buttons(search_query, message),
-                    silent=True
-                )
+                # Удаляем исходную команду ПОСЛЕ отправки нового сообщения
+                await self._safe_delete(message)
+                
+                # Используем для формы НОВОЕ сообщение (emoji_message)
+                if emoji_message:
+                    await self.inline.form(
+                        text="Выберите трек:",
+                        message=emoji_message,
+                        reply_markup=await self._build_music_buttons(search_query, message),
+                        silent=True
+                    )
+                else:
+                    # Если эмодзи отключены, отправляем новое сообщение с формой
+                    temp_msg = await self._safe_respond(message, "Выберите трек:")
+                    await self.inline.form(
+                        text="Выберите трек:",
+                        message=temp_msg,
+                        reply_markup=await self._build_music_buttons(search_query, message),
+                        silent=True
+                    )
             except Exception as e:
                 logger.error(f"Ошибка в watcher найтими: {e}")
                 error_message = await self._safe_respond(message, f"Ошибка: {str(e)}")
                 await self.delete_after(error_message, 3)
-            finally:
-                if emoji_message:
-                    await self._safe_delete(emoji_message)
 
     async def delete_after(self, message, seconds):
         """Удаляет сообщение через указанное количество секунд"""
