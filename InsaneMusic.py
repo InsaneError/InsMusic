@@ -8,10 +8,10 @@ from telethon.tl.types import Message
 logger = logging.getLogger(__name__)
 
 
-class InsMusic(loader.Module):
-    """Модуль для поиска музыки от @InsModule."""
+class SheoMusMod(loader.Module):
+    """Модуль для поиска музыки от @XSheo."""
 
-    strings = {'name': 'InsMusic'}
+    strings = {'name': 'SheoMus'}
 
     def __init__(self):
         try:
@@ -24,7 +24,7 @@ class InsMusic(loader.Module):
             self.failed_bots = {}
             super().__init__()
         except Exception as e:
-            logger.error(f"Ошибка инициализации InsMusic: {e}")
+            logger.error(f"Ошибка инициализации SheoMus: {e}")
 
     async def on_dlmod(self):
         """Вызывается при загрузке модуля"""
@@ -41,31 +41,28 @@ class InsMusic(loader.Module):
         self.client = client
         self.database = database
         
-        if not self.database.get("InsMusic", "allowed_chats"):
-            self.database.set("InsMusic", "allowed_chats", [])
+        if not self.database.get("SheoMus", "allowed_chats"):
+            self.database.set("SheoMus", "allowed_chats", [])
         
-        if not self.database.get("InsMusic", "music_bots"):
+        if not self.database.get("SheoMus", "music_bots"):
             default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot"]
-            self.database.set("InsMusic", "music_bots", default_bots)
+            self.database.set("SheoMus", "music_bots", default_bots)
 
-        if not self.database.get("InsMusic", "emojis_enabled"):
-            self.database.set("InsMusic", "emojis_enabled", True)
+        if not self.database.get("SheoMus", "emojis_enabled"):
+            self.database.set("SheoMus", "emojis_enabled", True)
 
     def _get_topic_id(self, message):
         """Получает ID темы из сообщения"""
         try:
-            # Проверяем reply_to
             if hasattr(message, 'reply_to') and message.reply_to:
                 if hasattr(message.reply_to, 'forum_topic') and message.reply_to.forum_topic:
                     return message.reply_to.reply_to_msg_id
                 elif hasattr(message.reply_to, 'reply_to_msg_id'):
                     return message.reply_to.reply_to_msg_id
             
-            # Проверяем прямой атрибут
             if hasattr(message, 'topic_id'):
                 return message.topic_id
             
-            # Проверяем chat
             if hasattr(message, 'chat') and hasattr(message.chat, 'forum') and message.chat.forum:
                 if hasattr(message, 'reply_to_msg_id'):
                     return message.reply_to_msg_id
@@ -85,23 +82,51 @@ class InsMusic(loader.Module):
         except Exception:
             return False
 
+    def _get_chat_id(self, message):
+        """Безопасное получение chat_id"""
+        try:
+            if hasattr(message, 'chat_id') and message.chat_id is not None:
+                chat_id = str(message.chat_id)
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                elif chat_id.startswith('-'):
+                    chat_id = chat_id[1:]
+                return chat_id
+            
+            if hasattr(message, 'peer_id') and message.peer_id is not None:
+                chat_id = str(message.peer_id)
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                elif chat_id.startswith('-'):
+                    chat_id = chat_id[1:]
+                return chat_id
+            
+            if hasattr(message, 'to_id') and message.to_id is not None:
+                chat_id = str(message.to_id)
+                if chat_id.startswith('-100'):
+                    chat_id = chat_id[4:]
+                elif chat_id.startswith('-'):
+                    chat_id = chat_id[1:]
+                return chat_id
+            
+            return "0"
+        except Exception:
+            return "0"
+
     async def _safe_respond(self, message, text):
         """Безопасная отправка ответа с обработкой TOPIC_CLOSED и поддержкой тем"""
         try:
             topic_id = self._get_topic_id(message)
             is_forum = self._is_forum_chat(message)
             
-            # В некоторых версиях Telethon topic передается через reply_to
             if topic_id and is_forum:
                 try:
-                    # Пробуем через reply_to
                     return await self.client.send_message(
                         message.to_id, 
                         text, 
                         reply_to=topic_id
                     )
                 except TypeError:
-                    # Если не поддерживается, пробуем через topic
                     try:
                         return await self.client.send_message(
                             message.to_id, 
@@ -109,7 +134,6 @@ class InsMusic(loader.Module):
                             topic=topic_id
                         )
                     except TypeError:
-                        # Если ничего не работает, отправляем без темы
                         return await self.client.send_message(message.to_id, text)
             else:
                 return await message.respond(text)
@@ -172,7 +196,6 @@ class InsMusic(loader.Module):
                 return await self.client.send_file(to_id, file, **kwargs)
             except Exception as e:
                 if "TOPIC_CLOSED" in str(e) or "TOPIC_DELETED" in str(e):
-                    # Пробуем без reply_to
                     kwargs.pop('reply_to', None)
                     return await self.client.send_file(to_id, file, **kwargs)
                 raise e
@@ -183,27 +206,27 @@ class InsMusic(loader.Module):
 
     @property
     def allowed_chats(self):
-        return self.database.get("InsMusic", "allowed_chats", [])
+        return self.database.get("SheoMus", "allowed_chats", [])
 
     @allowed_chats.setter
     def allowed_chats(self, value):
-        self.database.set("InsMusic", "allowed_chats", value)
+        self.database.set("SheoMus", "allowed_chats", value)
 
     @property
     def music_bots(self):
-        return self.database.get("InsMusic", "music_bots", [])
+        return self.database.get("SheoMus", "music_bots", [])
 
     @music_bots.setter
     def music_bots(self, value):
-        self.database.set("InsMusic", "music_bots", value)
+        self.database.set("SheoMus", "music_bots", value)
 
     @property
     def emojis_enabled(self):
-        return self.database.get("InsMusic", "emojis_enabled", True)
+        return self.database.get("SheoMus", "emojis_enabled", True)
 
     @emojis_enabled.setter
     def emojis_enabled(self, value):
-        self.database.set("InsMusic", "emojis_enabled", value)
+        self.database.set("SheoMus", "emojis_enabled", value)
 
     def clock_emoji(self):
         """Возвращает эмодзи часов или текст в зависимости от настройки"""
@@ -222,26 +245,6 @@ class InsMusic(loader.Module):
                 return False
         self.spam_protection[user_id] = current_time
         return True
-
-    def _get_chat_id(self, message):
-        """Безопасное получение chat_id"""
-        try:
-            chat_id = str(message.chat_id)
-            if chat_id.startswith('-100'):
-                chat_id = chat_id[4:]
-            elif chat_id.startswith('-'):
-                chat_id = chat_id[1:]
-            return chat_id
-        except Exception:
-            try:
-                chat_id = str(message.peer_id)
-                if chat_id.startswith('-100'):
-                    chat_id = chat_id[4:]
-                elif chat_id.startswith('-'):
-                    chat_id = chat_id[1:]
-                return chat_id
-            except Exception:
-                return str(message.to_id)
 
     def _get_track_id(self, document):
         """Генерирует уникальный ID для трека на основе его атрибутов"""
@@ -276,7 +279,6 @@ class InsMusic(loader.Module):
             topic_id = self._get_topic_id(reply_to_msg)
             is_forum = self._is_forum_chat(reply_to_msg)
             
-            # В некоторых версиях Telethon для тем используется reply_to с ID темы
             if topic_id and is_forum:
                 try:
                     return await self._safe_send_file(
@@ -355,8 +357,8 @@ class InsMusic(loader.Module):
                             'title': title,
                             'performer': performer,
                             'raw_title': result.result.title if hasattr(result.result, 'title') else '',
-                            'result_id': i,  
-                            'original_result': result  
+                            'result_id': i,
+                            'original_result': result
                         })
                     except Exception as e:
                         logger.error(f"Ошибка обработки результата от {bot_username}: {e}")
@@ -900,6 +902,9 @@ class InsMusic(loader.Module):
 
         chat_id = self._get_chat_id(message)
         
+        if chat_id == "0":
+            return
+        
         if chat_id not in self.allowed_chats:
             return
 
@@ -981,6 +986,10 @@ class InsMusic(loader.Module):
     async def addmcmd(self, message):
         """Добавить чат для работы без префикса"""
         chat_id = self._get_chat_id(message)
+        
+        if chat_id == "0":
+            await self._safe_edit(message, "Не удалось определить ID чата!")
+            return
             
         current_allowed_chats = self.allowed_chats.copy()
 
@@ -1003,6 +1012,10 @@ class InsMusic(loader.Module):
             chat_id = args
         else:
             chat_id = self._get_chat_id(message)
+            
+        if chat_id == "0":
+            await self._safe_edit(message, "Не удалось определить ID чата!")
+            return
             
         current_allowed_chats = self.allowed_chats.copy()
 
