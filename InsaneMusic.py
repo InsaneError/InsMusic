@@ -109,8 +109,18 @@ class SheoMusMod(loader.Module):
                     chat_id = chat_id[1:]
                 return chat_id
             
+            if hasattr(message, 'chat') and message.chat is not None:
+                if hasattr(message.chat, 'id') and message.chat.id is not None:
+                    chat_id = str(message.chat.id)
+                    if chat_id.startswith('-100'):
+                        chat_id = chat_id[4:]
+                    elif chat_id.startswith('-'):
+                        chat_id = chat_id[1:]
+                    return chat_id
+            
             return "0"
-        except Exception:
+        except Exception as e:
+            logger.error(f"Ошибка в _get_chat_id: {e}")
             return "0"
 
     async def _safe_respond(self, message, text):
@@ -1039,13 +1049,14 @@ class SheoMusMod(loader.Module):
             text = "Разрешенные чаты:\n\n"
             for chat_id in allowed_chats_list:
                 try:
-                    if chat_id.lstrip('-').isdigit():
+                    if chat_id and chat_id.lstrip('-').isdigit():
                         chat = await self.client.get_entity(int(chat_id))
                         title = getattr(chat, 'title', 'Личные сообщения')
                         text += f"• {title} ({chat_id})\n"
                     else:
                         text += f"• Неизвестный чат ({chat_id})\n"
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Ошибка получения чата {chat_id}: {e}")
                     text += f"• Неизвестный чат ({chat_id})\n"
             await self._safe_edit(message, text)
 
