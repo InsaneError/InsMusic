@@ -593,11 +593,6 @@ class SheoMusMod(loader.Module):
                 })
                 
                 score = self.calculate_relevance_score(track_info, cleaned_query)
-                
-                preferred_bots = ["ShillMusic_bot", "AudioBoxrobot", "vkm4_bot"]
-                if track_info['bot'] in preferred_bots:
-                    score += 5
-                
                 all_scored_results.append((score, track_info))
             
             if all_scored_results:
@@ -664,42 +659,8 @@ class SheoMusMod(loader.Module):
             
         cleaned_query = self.clean_query(query)
         
-        priority_bot = "ShillMusic_bot"
-        priority_results = []
-        
-        if not self.is_bot_failed(priority_bot):
-            try:
-                results = await self.search_in_bot(priority_bot, cleaned_query, message)
-                if results:
-                    for result in results:
-                        if result and result.get('document'):
-                            track_info = self.extract_track_info_from_document(
-                                result['document'], 
-                                result.get('raw_title', '')
-                            )
-                            track_info.update({
-                                'bot': priority_bot,
-                                'document': result['document'],
-                                'result_id': result.get('result_id', 0),
-                                'original_result': result.get('original_result')
-                            })
-                            priority_results.append(track_info)
-            except Exception as e:
-                logger.error(f"Ошибка при поиске в приоритетном боте {priority_bot}: {e}")
-        
-        if len(priority_results) >= 3:
-            priority_results.sort(
-                key=lambda x: self.calculate_relevance_score(x, cleaned_query), 
-                reverse=True
-            )
-            return self._filter_duplicate_tracks(priority_results[:10])
-        
-        inline_bots = [bot for bot in self.music_bots if bot != priority_bot and not self.is_bot_failed(bot)]
+        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
         all_scored_results = []
-        
-        for track_info in priority_results:
-            score = self.calculate_relevance_score(track_info, cleaned_query) + 20
-            all_scored_results.append((score, track_info))
         
         for bot_username in inline_bots:
             try:
@@ -725,11 +686,6 @@ class SheoMusMod(loader.Module):
                     })
                     
                     score = self.calculate_relevance_score(track_info, cleaned_query)
-                    
-                    preferred_bots = ["AudioBoxrobot", "vkm4_bot", "Lybot"]
-                    if bot_username in preferred_bots:
-                        score += 10
-                    
                     all_scored_results.append((score, track_info))
                     
             except Exception as e:
@@ -847,7 +803,7 @@ class SheoMusMod(loader.Module):
                 await self._safe_respond(message, error_text)
 
     async def _build_music_buttons(self, query: str, message: Message):
-        """Создает кнопки с результатами поиска, сначала проверяя ShillMusic_bot"""
+        """Создает кнопки с результатами поиска"""
         if not query:
             return [[{"text": "Пустой запрос", "action": "close"}]]
         
