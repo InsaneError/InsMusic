@@ -45,7 +45,13 @@ class SheoMusMod(loader.Module):
             self.database.set("SheoMus", "allowed_chats", [])
         
         if not self.database.get("SheoMus", "music_bots"):
-            default_bots = ["ShillMusic_bot","AudioBoxrobot","Lybot", "vkm4_bot", "MusicDownloaderBot"]
+            default_bots = [
+                "Lybot",
+                "vkmusic_bot",
+                "tgmusicbot",
+                "spotifydownloader_bot",
+                "auddbot"
+            ]
             self.database.set("SheoMus", "music_bots", default_bots)
 
         if not self.database.get("SheoMus", "emojis_enabled"):
@@ -328,7 +334,7 @@ class SheoMusMod(loader.Module):
         self.failed_bots[bot_username] = time.time()
 
     async def search_in_bot(self, bot_username, query, message):
-        """Поиск в одном боте с получением нескольких результатов"""
+        """Улучшенный поиск в одном боте с получением нескольких результатов"""
         if self.is_bot_failed(bot_username):
             return []
             
@@ -398,7 +404,7 @@ class SheoMusMod(loader.Module):
         return query
 
     def calculate_relevance_score(self, track_info, original_query):
-        """Расчет релевантности трека с приоритетом на название"""
+        """Улучшенный расчет релевантности трека с приоритетом на название"""
         if not original_query or not track_info:
             return 0
             
@@ -500,7 +506,7 @@ class SheoMusMod(loader.Module):
         }
 
     async def search_music_all_bots(self, query, message):
-        """Поиск по ВСЕМ ботам, сбор всех результатов, выбор лучшего"""
+        """Улучшенный поиск по всем ботам с приоритетом названия"""
         if not query:
             return None
             
@@ -515,10 +521,40 @@ class SheoMusMod(loader.Module):
             words = cleaned_query.split()
             search_variations.append(' '.join(words[:-1]))
         
-        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
+        # Приоритетный бот - Lybot
+        priority_bot = "Lybot"
+        priority_results = []
         
-        # Собираем ВСЕ результаты со ВСЕХ ботов и ВСЕХ вариаций
-        all_scored_results = []
+        if not self.is_bot_failed(priority_bot):
+            try:
+                results = await self.search_in_bot(priority_bot, cleaned_query, message)
+                if results:
+                    for result in results:
+                        if result and result.get('document'):
+                            track_info = self.extract_track_info_from_document(
+                                result['document'], 
+                                result.get('raw_title', '')
+                            )
+                            track_info.update({
+                                'bot': priority_bot,
+                                'document': result['document'],
+                                'result_id': result.get('result_id', 0),
+                                'original_result': result.get('original_result')
+                            })
+                            priority_results.append(track_info)
+            except Exception as e:
+                logger.error(f"Ошибка при поиске в приоритетном боте {priority_bot}: {e}")
+        
+        # Если Lybot нашел хороший результат
+        if priority_results:
+            for track_info in priority_results:
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                if score >= 20:
+                    return track_info['document']
+        
+        # Поиск по всем остальным ботам
+        inline_bots = [bot for bot in self.music_bots if bot != priority_bot and not self.is_bot_failed(bot)]
+        all_results = []
         
         for search_query in search_variations:
             if not search_query:
@@ -529,44 +565,79 @@ class SheoMusMod(loader.Module):
                 task = asyncio.create_task(self.search_in_bot(bot_username, search_query, message))
                 search_tasks.append(task)
             
-            # Ждём завершения ВСЕХ задач
-            results_list = await asyncio.gather(*search_tasks, return_exceptions=True)
+            start_time = time.time()
+            timeout = 8.0
             
-            for task_result in results_list:
-                if isinstance(task_result, Exception):
-                    continue
-                    
-                if not isinstance(task_result, list) or not task_result:
+            while time.time() - start_time < timeout and search_tasks:
+                completed = [t for t in search_tasks if t.done()]
+                
+                for task in completed:
+                    search_tasks.remove(task)
+                        
+                    try:
+                        results = task.result()
+                        if isinstance(results, list) and results:
+                            all_results.extend(results)
+                            
+                            scored_results = []
+                            for result in results:
+                                if not result or not result.get('document'):
+                                    continue
+                                
+                                track_info = self.extract_track_info_from_document(
+                                    result['document'], 
+                                    result.get('raw_title', '')
+                                )
+                                
+                                track_info.update({
+                                    'bot': result.get('bot', ''),
+                                    'document': result['document'],
+                                    'result_id': result.get('result_id', 0),
+                                    'original_result': result.get('original_result')
+                                })
+                                
+                                score = self.calculate_relevance_score(track_info, cleaned_query)
+                                scored_results.append((score, track_info))
+                            
+                            if scored_results:
+                                scored_results.sort(key=lambda x: x[0], reverse=True)
+                                best_score, best_result = scored_results[0]
+                                
+                                if best_score >= 20:
+                                    return best_result['document']
+                        
+                    except Exception as e:
+                        logger.error(f"Ошибка обработки результатов: {e}")
+                
+                if search_tasks:
+                    await asyncio.sleep(0.2)
+        
+        if all_results:
+            all_scored_results = []
+            for result in all_results:
+                if not result or not result.get('document'):
                     continue
                 
-                for result in task_result:
-                    if not result or not result.get('document'):
-                        continue
-                    
-                    track_info = self.extract_track_info_from_document(
-                        result['document'], 
-                        result.get('raw_title', '')
-                    )
-                    
-                    track_info.update({
-                        'bot': result.get('bot', ''),
-                        'document': result['document'],
-                        'result_id': result.get('result_id', 0),
-                        'original_result': result.get('original_result')
-                    })
-                    
-                    score = self.calculate_relevance_score(track_info, cleaned_query)
-                    all_scored_results.append((score, track_info))
-        
-        if not all_scored_results:
-            return None
-        
-        # Сортируем и возвращаем лучший
-        all_scored_results.sort(key=lambda x: x[0], reverse=True)
-        best_score, best_result = all_scored_results[0]
-        
-        if best_score >= 10:
-            return best_result['document']
+                track_info = self.extract_track_info_from_document(
+                    result['document'], 
+                    result.get('raw_title', '')
+                )
+                
+                track_info.update({
+                    'bot': result.get('bot', ''),
+                    'document': result['document'],
+                    'result_id': result.get('result_id', 0),
+                    'original_result': result.get('original_result')
+                })
+                
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                all_scored_results.append((score, track_info))
+            
+            if all_scored_results:
+                all_scored_results.sort(key=lambda x: x[0], reverse=True)
+                best_score, best_result = all_scored_results[0]
+                if best_score >= 10:
+                    return best_result['document']
         
         return None
 
@@ -620,50 +691,51 @@ class SheoMusMod(loader.Module):
         return unique_tracks
 
     async def search_music_inline(self, query, message, offset=0):
-        """Поиск музыки для инлайн-режима с возвратом нескольких результатов"""
+        """Поиск музыки для инлайн-режима с возвратом нескольких результатов (без приоритета Lybot)"""
         if not query:
             return []
             
         cleaned_query = self.clean_query(query)
         
-        inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
-        
-        # Собираем результаты со ВСЕХ ботов параллельно
-        all_tasks = []
-        for bot_username in inline_bots:
-            task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
-            all_tasks.append(task)
-        
-        # Ждём завершения ВСЕХ задач
-        all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
-        
+        # Получаем все боты, включая Lybot, но без приоритета
+        all_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
         all_scored_results = []
         
-        for task_result in all_results:
-            if isinstance(task_result, Exception):
-                continue
+        for bot_username in all_bots:
+            try:
+                results = await self.search_in_bot(bot_username, cleaned_query, message)
                 
-            if not isinstance(task_result, list) or not task_result:
-                continue
-            
-            for result in task_result:
-                if not result or not result.get('document'):
+                if not results:
                     continue
                 
-                track_info = self.extract_track_info_from_document(
-                    result['document'], 
-                    result.get('raw_title', '')
-                )
-                
-                track_info.update({
-                    'bot': result.get('bot', ''),
-                    'document': result['document'],
-                    'result_id': result.get('result_id', 0),
-                    'original_result': result.get('original_result')
-                })
-                
-                score = self.calculate_relevance_score(track_info, cleaned_query)
-                all_scored_results.append((score, track_info))
+                for result in results:
+                    if not result or not result.get('document'):
+                        continue
+                    
+                    track_info = self.extract_track_info_from_document(
+                        result['document'], 
+                        result.get('raw_title', '')
+                    )
+                    
+                    track_info.update({
+                        'bot': bot_username,
+                        'document': result['document'],
+                        'result_id': result.get('result_id', 0),
+                        'original_result': result.get('original_result')
+                    })
+                    
+                    score = self.calculate_relevance_score(track_info, cleaned_query)
+                    
+                    # Предпочитаемые боты (без Lybot)
+                    preferred_bots = ["vkmusic_bot", "tgmusicbot", "spotifydownloader_bot", "auddbot"]
+                    if bot_username in preferred_bots:
+                        score += 10
+                    
+                    all_scored_results.append((score, track_info))
+                    
+            except Exception as e:
+                logger.error(f"Ошибка при поиске в {bot_username}: {e}")
+                continue
         
         if not all_scored_results:
             return []
@@ -1017,12 +1089,14 @@ class SheoMusMod(loader.Module):
             await self._safe_edit(message, "Укажите username бота!")
             return
         
-        bot_username = args.replace('@', '').strip()
+        bot_username = args.replace('@', '').strip().lower()
+        
         if not bot_username:
             await self._safe_edit(message, "Некорректный username бота!")
             return
-            
-        if bot_username in self.music_bots:
+        
+        existing_bots_lower = [b.lower() for b in self.music_bots]
+        if bot_username in existing_bots_lower:
             await self._safe_edit(message, "Этот бот уже есть в списке!")
         else:
             current_bots_list = self.music_bots.copy()
@@ -1041,13 +1115,53 @@ class SheoMusMod(loader.Module):
             await self._safe_edit(message, "Укажите username бота!")
             return
         
-        bot_username = args.replace('@', '').strip()
-        if bot_username in self.music_bots:
-            current_bots_list = self.music_bots.copy()
-            current_bots_list.remove(bot_username)
+        bot_username = args.replace('@', '').strip().lower()
+        
+        current_bots_list = self.music_bots.copy()
+        found = False
+        for i, bot in enumerate(current_bots_list):
+            if bot.lower() == bot_username:
+                del current_bots_list[i]
+                found = True
+                break
+        
+        if found:
             self.music_bots = current_bots_list
-            if bot_username in self.failed_bots:
-                del self.failed_bots[bot_username]
+            for key in list(self.failed_bots.keys()):
+                if key.lower() == bot_username:
+                    del self.failed_bots[key]
             await self._safe_edit(message, f"Бот @{bot_username} удален из списка!")
         else:
             await self._safe_edit(message, "Этот бот не найден в списке!")
+
+    @loader.command(
+        ru_doc="Сбрасывает список ботов к исходному (Lybot, vkmusic_bot, tgmusicbot, spotifydownloader_bot, auddbot)",
+        en_doc="Resets bot list to default (Lybot, vkmusic_bot, tgmusicbot, spotifydownloader_bot, auddbot)"
+    )
+    async def resetbotsmcmd(self, message):
+        """Сброс списка ботов к дефолтному"""
+        default_bots = [
+            "Lybot",
+            "vkmusic_bot",
+            "tgmusicbot",
+            "spotifydownloader_bot",
+            "auddbot"
+        ]
+        
+        current_bots = self.music_bots.copy()
+        current_lower = [b.lower() for b in current_bots]
+        default_lower = [b.lower() for b in default_bots]
+        
+        if current_lower == default_lower:
+            await self._safe_edit(message, "Список ботов уже соответствует исходному!")
+            return
+        
+        self.music_bots = default_bots.copy()
+        self.failed_bots.clear()
+        
+        text = "Список ботов сброшен к исходному:\n\n"
+        for i, bot in enumerate(default_bots, 1):
+            text += f"{i}. @{bot}\n"
+        text += "\nВсе боты разблокированы."
+        
+        await self._safe_edit(message, text)
