@@ -328,7 +328,7 @@ class SheoMusMod(loader.Module):
         self.failed_bots[bot_username] = time.time()
 
     async def search_in_bot(self, bot_username, query, message):
-        """Улучшенный поиск в одном боте с получением нескольких результатов"""
+        """Поиск в одном боте с получением нескольких результатов"""
         if self.is_bot_failed(bot_username):
             return []
             
@@ -398,7 +398,7 @@ class SheoMusMod(loader.Module):
         return query
 
     def calculate_relevance_score(self, track_info, original_query):
-        """Улучшенный расчет релевантности трека с приоритетом на название"""
+        """Расчет релевантности трека с приоритетом на название"""
         if not original_query or not track_info:
             return 0
             
@@ -500,7 +500,7 @@ class SheoMusMod(loader.Module):
         }
 
     async def search_music_all_bots(self, query, message):
-        """Улучшенный поиск по всем ботам с приоритетом названия"""
+        """Поиск по ВСЕМ ботам, сбор всех результатов, выбор лучшего"""
         if not query:
             return None
             
@@ -516,7 +516,9 @@ class SheoMusMod(loader.Module):
             search_variations.append(' '.join(words[:-1]))
         
         inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
-        all_results = []
+        
+        # Собираем ВСЕ результаты со ВСЕХ ботов и ВСЕХ вариаций
+        all_scored_results = []
         
         for search_query in search_variations:
             if not search_query:
@@ -527,79 +529,44 @@ class SheoMusMod(loader.Module):
                 task = asyncio.create_task(self.search_in_bot(bot_username, search_query, message))
                 search_tasks.append(task)
             
-            start_time = time.time()
-            timeout = 8.0
+            # Ждём завершения ВСЕХ задач
+            results_list = await asyncio.gather(*search_tasks, return_exceptions=True)
             
-            while time.time() - start_time < timeout and search_tasks:
-                completed = [t for t in search_tasks if t.done()]
-                
-                for task in completed:
-                    search_tasks.remove(task)
-                        
-                    try:
-                        results = task.result()
-                        if isinstance(results, list) and results:
-                            all_results.extend(results)
-                            
-                            scored_results = []
-                            for result in results:
-                                if not result or not result.get('document'):
-                                    continue
-                                
-                                track_info = self.extract_track_info_from_document(
-                                    result['document'], 
-                                    result.get('raw_title', '')
-                                )
-                                
-                                track_info.update({
-                                    'bot': result.get('bot', ''),
-                                    'document': result['document'],
-                                    'result_id': result.get('result_id', 0),
-                                    'original_result': result.get('original_result')
-                                })
-                                
-                                score = self.calculate_relevance_score(track_info, cleaned_query)
-                                scored_results.append((score, track_info))
-                            
-                            if scored_results:
-                                scored_results.sort(key=lambda x: x[0], reverse=True)
-                                best_score, best_result = scored_results[0]
-                                
-                                if best_score >= 20:
-                                    return best_result['document']
-                        
-                    except Exception as e:
-                        logger.error(f"Ошибка обработки результатов: {e}")
-                
-                if search_tasks:
-                    await asyncio.sleep(0.2)
-        
-        if all_results:
-            all_scored_results = []
-            for result in all_results:
-                if not result or not result.get('document'):
+            for task_result in results_list:
+                if isinstance(task_result, Exception):
+                    continue
+                    
+                if not isinstance(task_result, list) or not task_result:
                     continue
                 
-                track_info = self.extract_track_info_from_document(
-                    result['document'], 
-                    result.get('raw_title', '')
-                )
-                
-                track_info.update({
-                    'bot': result.get('bot', ''),
-                    'document': result['document'],
-                    'result_id': result.get('result_id', 0),
-                    'original_result': result.get('original_result')
-                })
-                
-                score = self.calculate_relevance_score(track_info, cleaned_query)
-                all_scored_results.append((score, track_info))
-            
-            if all_scored_results:
-                all_scored_results.sort(key=lambda x: x[0], reverse=True)
-                best_score, best_result = all_scored_results[0]
-                if best_score >= 10:
-                    return best_result['document']
+                for result in task_result:
+                    if not result or not result.get('document'):
+                        continue
+                    
+                    track_info = self.extract_track_info_from_document(
+                        result['document'], 
+                        result.get('raw_title', '')
+                    )
+                    
+                    track_info.update({
+                        'bot': result.get('bot', ''),
+                        'document': result['document'],
+                        'result_id': result.get('result_id', 0),
+                        'original_result': result.get('original_result')
+                    })
+                    
+                    score = self.calculate_relevance_score(track_info, cleaned_query)
+                    all_scored_results.append((score, track_info))
+        
+        if not all_scored_results:
+            return None
+        
+        # Сортируем и возвращаем лучший
+        all_scored_results.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_result = all_scored_results[0]
+        
+        if best_score >= 10:
+            return best_result['document']
         
         return None
 
@@ -660,37 +627,43 @@ class SheoMusMod(loader.Module):
         cleaned_query = self.clean_query(query)
         
         inline_bots = [bot for bot in self.music_bots if not self.is_bot_failed(bot)]
+        
+        # Собираем результаты со ВСЕХ ботов параллельно
+        all_tasks = []
+        for bot_username in inline_bots:
+            task = asyncio.create_task(self.search_in_bot(bot_username, cleaned_query, message))
+            all_tasks.append(task)
+        
+        # Ждём завершения ВСЕХ задач
+        all_results = await asyncio.gather(*all_tasks, return_exceptions=True)
+        
         all_scored_results = []
         
-        for bot_username in inline_bots:
-            try:
-                results = await self.search_in_bot(bot_username, cleaned_query, message)
+        for task_result in all_results:
+            if isinstance(task_result, Exception):
+                continue
                 
-                if not results:
+            if not isinstance(task_result, list) or not task_result:
+                continue
+            
+            for result in task_result:
+                if not result or not result.get('document'):
                     continue
                 
-                for result in results:
-                    if not result or not result.get('document'):
-                        continue
-                    
-                    track_info = self.extract_track_info_from_document(
-                        result['document'], 
-                        result.get('raw_title', '')
-                    )
-                    
-                    track_info.update({
-                        'bot': bot_username,
-                        'document': result['document'],
-                        'result_id': result.get('result_id', 0),
-                        'original_result': result.get('original_result')
-                    })
-                    
-                    score = self.calculate_relevance_score(track_info, cleaned_query)
-                    all_scored_results.append((score, track_info))
-                    
-            except Exception as e:
-                logger.error(f"Ошибка при поиске в {bot_username}: {e}")
-                continue
+                track_info = self.extract_track_info_from_document(
+                    result['document'], 
+                    result.get('raw_title', '')
+                )
+                
+                track_info.update({
+                    'bot': result.get('bot', ''),
+                    'document': result['document'],
+                    'result_id': result.get('result_id', 0),
+                    'original_result': result.get('original_result')
+                })
+                
+                score = self.calculate_relevance_score(track_info, cleaned_query)
+                all_scored_results.append((score, track_info))
         
         if not all_scored_results:
             return []
